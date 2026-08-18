@@ -12,6 +12,7 @@ from io import BytesIO
 import numpy as np
 
 INTERRUPTED_MARKER = "[interrupted]"
+USER_AUDIO_MARKER = "[audio]"
 SAMPLE_RATE = 24000
 
 
