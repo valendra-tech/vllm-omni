@@ -27,6 +27,7 @@ from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
 )
 from vllm_omni.experimental.fullduplex.qwen3omni.session import (
     Qwen3OmniServingSessionState,
+    USER_AUDIO_MARKER,
 )
 
 ChatServiceCall = Callable[[dict[str, Any], Any], Any]
@@ -51,6 +52,7 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
         self._chat_service = chat_service
         self._sample_rate = sample_rate
         self._states: dict[str, Qwen3OmniServingSessionState] = {}
+        self._responding: set[str] = set()
 
     def capabilities(self) -> DuplexCapability:
         return DuplexCapability(
@@ -80,45 +82,56 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
         state = self._get_state(session)
         return state.pcm.size > 0
 
+    async def on_barge_in(self, session: DuplexSession) -> None:
+        if session.session_id in self._responding:
+            self._get_state(session).record_interrupted_turn()
+
     async def respond(self, session: DuplexSession) -> AsyncIterator[OutputChunk]:
         state = self._get_state(session)
-        request = _ChatRequestDict(self._build_request(state))
-        result = self._chat_service.create_chat_completion(request, raw_request=None)
-        if inspect.isawaitable(result):
-            result = await result
-        if hasattr(result, "__aiter__"):
-            async for raw_chunk in result:
-                for payload in _parse_sse_payloads(raw_chunk):
-                    if payload == "[DONE]":
-                        continue
-                    if isinstance(payload, dict):
-                        chunk = _extract_content_chunk(payload)
-                        if chunk is None:
+        self._responding.add(session.session_id)
+        try:
+            had_audio = state.pcm.size > 0
+            request = _ChatRequestDict(self._build_request(state))
+            result = self._chat_service.create_chat_completion(request, raw_request=None)
+            if inspect.isawaitable(result):
+                result = await result
+            if hasattr(result, "__aiter__"):
+                async for raw_chunk in result:
+                    for payload in _parse_sse_payloads(raw_chunk):
+                        if payload == "[DONE]":
                             continue
-                        modality, content = chunk
-                        if modality == "audio":
-                            yield OutputChunk("audio", content)
-                        else:
-                            state.record_partial_text(content)
-                            yield OutputChunk("text", content)
-                        state.record_completed_turn(state._assistant_text())
-        else:
-            payload = result.model_dump(mode="json", exclude_unset=True) if hasattr(result, "model_dump") else {}
-            chunk = _extract_content_chunk(payload)
-            if chunk is not None:
-                modality, content = chunk
-                if modality == "audio":
-                    yield OutputChunk("audio", content)
-                else:
-                    state.record_partial_text(content)
-                    yield OutputChunk("text", content)
-                state.record_completed_turn(state._assistant_text())
-        state.pcm = state.pcm  # no-op: buffer already drained by build_audio_content_part
+                        if isinstance(payload, dict):
+                            chunk = _extract_content_chunk(payload)
+                            if chunk is None:
+                                continue
+                            modality, content = chunk
+                            if modality == "audio":
+                                yield OutputChunk("audio", content)
+                            else:
+                                state.record_partial_text(content)
+                                yield OutputChunk("text", content)
+            else:
+                payload = result.model_dump(mode="json", exclude_unset=True) if hasattr(result, "model_dump") else {}
+                chunk = _extract_content_chunk(payload)
+                if chunk is not None:
+                    modality, content = chunk
+                    if modality == "audio":
+                        yield OutputChunk("audio", content)
+                    else:
+                        state.record_partial_text(content)
+                        yield OutputChunk("text", content)
+            final_text = state._assistant_text()
+            if had_audio:
+                state.record_user_input(USER_AUDIO_MARKER)
+            state.record_completed_turn(final_text)
+        finally:
+            self._responding.discard(session.session_id)
 
     def _build_request(self, state: Qwen3OmniServingSessionState) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if state.last_turn_interrupted:
             messages.append({"role": "system", "content": INTERRUPTION_NOTE})
+            state.last_turn_interrupted = False
         messages.extend(state.history)
         user_part: list[dict[str, Any]] = []
         if state.pcm.size:
