@@ -61,7 +61,7 @@ class Qwen3OmniServingSessionState:
         self.last_turn_interrupted = True
         self._partial_text = []
 
-    def _assistant_text(self) -> str:
+    def assistant_text(self) -> str:
         return "".join(self._partial_text)
 
 

@@ -45,12 +45,22 @@ class _StubChatService:
             yield item
 
 
+class _FailingChatService:
+    async def create_chat_completion(self, request, raw_request=None):
+        raise RuntimeError("boom")
+
+
+class _ErrorPayloadChatService:
+    async def create_chat_completion(self, request, raw_request=None):
+        yield "data: " + json.dumps({"error": "no audio produced"}) + "\n\n"
+
+
 def _make_adapter():
     chat = _StubChatService()
     adapter = Qwen3OmniDuplexAdapter(chat)
     session = DuplexSession(session_id="s1")
     state = Qwen3OmniServingSessionState()
-    adapter._state = state
+    adapter._states["s1"] = state
     return adapter, session, chat
 
 
@@ -58,7 +68,7 @@ def test_capabilities_audio_text_proactive():
     adapter, _, _ = _make_adapter()
     caps = adapter.capabilities()
     assert caps == DuplexCapability(
-        input_modalities=frozenset({"audio", "text"}),
+        input_modalities=frozenset({"audio"}),
         output_modalities=frozenset({"audio", "text"}),
         proactive=True,
     )
@@ -67,12 +77,12 @@ def test_capabilities_audio_text_proactive():
 def test_on_input_audio_buffers_pcm():
     adapter, session, _ = _make_adapter()
     asyncio.run(adapter.on_input(session, "audio", np.zeros(100, dtype=np.float32)))
-    assert adapter._state.pcm.size == 100
+    assert adapter._states["s1"].pcm.size == 100
 
 
 def test_respond_builds_chat_request_with_policy_and_audio():
     adapter, session, chat = _make_adapter()
-    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
 
     async def drive():
         chunks = [c async for c in adapter.respond(session)]
@@ -86,15 +96,15 @@ def test_respond_builds_chat_request_with_policy_and_audio():
     assert request["modalities"] == ["audio", "text"]
     assert [c.modality for c in chunks] == ["audio", "text"]
     assert chunks[0].data == "<audio-b64>"
-    assert adapter._state.history[-1]["content"] == " hi "
-    assert len(adapter._state.history) == 2
+    assert adapter._states["s1"].history[-1]["content"] == " hi "
+    assert len(adapter._states["s1"].history) == 2
 
 
 def test_respond_adds_interruption_note_after_barge_in():
     adapter, session, chat = _make_adapter()
-    adapter._state.record_user_input("first")
-    adapter._state.record_interrupted_turn()
-    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+    adapter._states["s1"].record_user_input("first")
+    adapter._states["s1"].record_interrupted_turn()
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
 
     async def drive():
         return [c async for c in adapter.respond(session)]
@@ -108,25 +118,58 @@ def test_respond_adds_interruption_note_after_barge_in():
 
 def test_on_barge_in_marks_in_flight_turn_interrupted():
     adapter, session, chat = _make_adapter()
-    adapter._state.record_user_input("hello")
-    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+    adapter._states["s1"].record_user_input("hello")
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
     adapter._responding.add(session.session_id)
 
     asyncio.run(adapter.on_barge_in(session))
 
-    assert adapter._state.history[-1] == {"role": "assistant", "content": INTERRUPTED_MARKER}
-    assert adapter._state.last_turn_interrupted is True
+    assert adapter._states["s1"].history[-1] == {
+        "role": "assistant",
+        "content": INTERRUPTED_MARKER,
+    }
+    assert adapter._states["s1"].last_turn_interrupted is True
 
 
 def test_history_records_audio_user_turn_once():
     adapter, session, chat = _make_adapter()
-    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
 
     async def drive():
         return [c async for c in adapter.respond(session)]
 
     asyncio.run(drive())
-    history = adapter._state.history
+    history = adapter._states["s1"].history
     assert history[0] == {"role": "user", "content": "[audio]"}
     assert history[1] == {"role": "assistant", "content": " hi "}
     assert len(history) == 2
+
+
+def test_respond_propagates_service_exception():
+    adapter = Qwen3OmniDuplexAdapter(_FailingChatService())
+    session = DuplexSession(session_id="s1")
+    adapter._states["s1"] = Qwen3OmniServingSessionState()
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
+
+    async def drive():
+        return [c async for c in adapter.respond(session)]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(drive())
+    # interrupted flag survives a failed turn
+    assert adapter._states["s1"].last_turn_interrupted is False
+    assert adapter._states["s1"].history == []
+
+
+def test_respond_raises_on_error_payload():
+    adapter = Qwen3OmniDuplexAdapter(_ErrorPayloadChatService())
+    session = DuplexSession(session_id="s1")
+    adapter._states["s1"] = Qwen3OmniServingSessionState()
+    adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
+
+    async def drive():
+        return [c async for c in adapter.respond(session)]
+
+    with pytest.raises(RuntimeError, match="no audio produced"):
+        asyncio.run(drive())
+    assert adapter._states["s1"].history == []
