@@ -1,4 +1,3 @@
-# vllm_omni/experimental/fullduplex/qwen3omni/data_plane.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Realtime data-plane projection for the Qwen3-Omni duplex adapter."""
@@ -16,17 +15,15 @@ class Qwen3OmniDataPlaneSession:
     def __init__(self, encode_audio: EncodeAudio) -> None:
         self._encode_audio = encode_audio
         self._terminal: set[str] = set()
-        self._active: set[str] = set()
 
     def begin_request(self, request_id: str) -> None:
-        self._active.add(request_id)
+        pass
 
     def is_terminal(self, request_id: str | None) -> bool:
         return request_id is None or request_id in self._terminal
 
     def mark_terminal(self, request_id: str) -> None:
         self._terminal.add(request_id)
-        self._active.discard(request_id)
 
     def close_stream(self, request_id: str) -> None:
         self.mark_terminal(request_id)
@@ -45,6 +42,6 @@ class Qwen3OmniDataPlaneSession:
                 encoded = self._encode_audio(data, 24000, "pcm16")
                 if encoded is not None:
                     events.append({"type": "response.audio.delta", "audio": encoded})
-            else:
+            elif modality == "text":
                 events.append({"type": "response.audio_transcript.delta", "delta": data})
         return events
