@@ -60,6 +60,9 @@ class Qwen3OmniServingSessionState:
         self.last_turn_interrupted = True
         self._partial_text = []
 
+    def _assistant_text(self) -> str:
+        return "".join(self._partial_text)
+
 
 def _pcm_to_wav(samples: np.ndarray, sample_rate: int) -> bytes:
     pcm16 = np.clip(samples, -1.0, 1.0)
