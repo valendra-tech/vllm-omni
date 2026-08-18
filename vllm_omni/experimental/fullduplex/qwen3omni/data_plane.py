@@ -5,8 +5,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 EncodeAudio = Callable[[object, int, str, float | None], str | None]
+
+
+@dataclass(frozen=True, slots=True)
+class Qwen3OmniDataPlaneContext:
+    """Serving state needed to project one Qwen3-Omni data-plane output."""
+
+    epoch: int = 0
+    turn_id: int = 0
+    active_response_turn_id: int | None = None
+    active_response_id: str | None = None
+    auto_responds: bool = False
+    response_format: str = "wav"
+    speed: float | None = None
+    modalities: tuple[str, ...] = ()
 
 
 class Qwen3OmniDataPlaneSession:

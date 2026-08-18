@@ -3,9 +3,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Serving runtime adapter tests for Qwen3-Omni duplex."""
 
+import asyncio
+
 import pytest
 
 from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+    ServingRuntimeConfigError,
     load_serving_runtime_adapter,
 )
 from vllm_omni.experimental.fullduplex.qwen3omni.serving_adapter import (
@@ -48,7 +51,8 @@ def test_load_serving_runtime_adapter_validates():
 def test_is_enabled_and_private_keys():
     adapter = Qwen3OmniServingRuntimeAdapter(_encode)
     assert adapter.is_enabled({"session_mode": "duplex"}) is True
-    assert adapter.is_enabled({"session_mode": "turn_commit_only"}) is False
+    assert adapter.is_enabled({"session_mode": "turn"}) is False
+    assert adapter.is_enabled(object()) is False
     assert "auto_commit_silence_ms" in adapter.private_runtime_config_keys
 
 
@@ -65,3 +69,33 @@ def test_data_plane_context():
         modalities=("audio", "text"),
     )
     assert ctx.auto_responds is True
+
+
+def test_validate_client_extra_body_rejects_private_keys():
+    adapter = Qwen3OmniServingRuntimeAdapter(_encode)
+    with pytest.raises(ServingRuntimeConfigError):
+        adapter.validate_client_extra_body({"auto_commit_silence_ms": 300})
+    adapter.validate_client_extra_body({"instructions": "hi"})  # no raise
+
+
+class _FakeSessionConfig:
+    def __init__(self, extra_body=None):
+        self.extra_body = extra_body or {}
+
+
+def test_enabled_and_runtime_config_via_session_config_shape():
+    adapter = Qwen3OmniServingRuntimeAdapter(_encode)
+    assert adapter.is_enabled(_FakeSessionConfig({"session_mode": "duplex"})) is True
+    assert adapter.is_enabled(_FakeSessionConfig({})) is False
+    runtime = asyncio.run(
+        adapter.prepare_runtime_config(
+            _FakeSessionConfig({"auto_commit_silence_ms": 500}),
+            model_config=None,
+        )
+    )
+    assert runtime == {"auto_commit_silence_ms": 500}
+    merged = adapter.runtime_config_for_update(
+        _FakeSessionConfig({"auto_commit_silence_ms": 700}),
+        {"auto_commit_silence_ms": 500},
+    )
+    assert merged == {"auto_commit_silence_ms": 700}
