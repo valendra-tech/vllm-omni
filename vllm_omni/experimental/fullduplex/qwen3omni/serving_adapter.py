@@ -9,7 +9,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from vllm_omni.experimental.fullduplex.openai.protocol import DuplexCapabilities
+from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+    ServingRuntimeConfigError,
+)
 from vllm_omni.experimental.fullduplex.qwen3omni.data_plane import (
+    Qwen3OmniDataPlaneContext,
     Qwen3OmniDataPlaneSession,
 )
 from vllm_omni.experimental.fullduplex.qwen3omni.session import (
@@ -19,29 +23,6 @@ from vllm_omni.experimental.fullduplex.qwen3omni.session import (
 EncodeAudio = Callable[[object, int, str, float | None], str | None]
 
 PRIVATE_RUNTIME_CONFIG_KEYS = frozenset({"auto_commit_silence_ms"})
-
-
-class Qwen3OmniDataPlaneContext:
-    def __init__(
-        self,
-        *,
-        epoch: int,
-        turn_id: int,
-        active_response_turn_id: int | None,
-        active_response_id: str | None,
-        auto_responds: bool,
-        response_format: str,
-        speed: float | None,
-        modalities: tuple[str, ...],
-    ) -> None:
-        self.epoch = epoch
-        self.turn_id = turn_id
-        self.active_response_turn_id = active_response_turn_id
-        self.active_response_id = active_response_id
-        self.auto_responds = auto_responds
-        self.response_format = response_format
-        self.speed = speed
-        self.modalities = modalities
 
 
 class Qwen3OmniServingRuntimeAdapter:
@@ -71,10 +52,12 @@ class Qwen3OmniServingRuntimeAdapter:
 
     @staticmethod
     def is_enabled(config: object) -> bool:
-        mode = None
         if isinstance(config, Mapping):
-            mode = config.get("session_mode")
-        return mode == "duplex"
+            return config.get("session_mode") == "duplex"
+        extra_body = getattr(config, "extra_body", None)
+        if isinstance(extra_body, Mapping):
+            return extra_body.get("session_mode") == "duplex"
+        return False
 
     @staticmethod
     def capabilities(*, max_sessions: int) -> DuplexCapabilities:
@@ -105,15 +88,18 @@ class Qwen3OmniServingRuntimeAdapter:
             return
         for key in PRIVATE_RUNTIME_CONFIG_KEYS:
             if key in extra_body:
-                raise ValueError(f"client cannot set private runtime key: {key}")
+                raise ServingRuntimeConfigError(
+                    f"client cannot set private runtime key: {key}"
+                )
 
     @staticmethod
     async def prepare_runtime_config(config: object, *, model_config: Any) -> dict[str, object]:
         runtime: dict[str, object] = {}
-        if isinstance(config, Mapping):
-            for key in ("auto_commit_silence_ms",):
-                if key in config:
-                    runtime[key] = config[key]
+        source: object | None = (
+            config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
+        )
+        if isinstance(source, Mapping) and "auto_commit_silence_ms" in source:
+            runtime["auto_commit_silence_ms"] = source["auto_commit_silence_ms"]
         return runtime
 
     @staticmethod
@@ -122,10 +108,11 @@ class Qwen3OmniServingRuntimeAdapter:
         current: Mapping[str, object],
     ) -> dict[str, object]:
         merged = dict(current)
-        if isinstance(config, Mapping):
-            for key in ("auto_commit_silence_ms",):
-                if key in config:
-                    merged[key] = config[key]
+        source: object | None = (
+            config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
+        )
+        if isinstance(source, Mapping) and "auto_commit_silence_ms" in source:
+            merged["auto_commit_silence_ms"] = source["auto_commit_silence_ms"]
         return merged
 
     @staticmethod
