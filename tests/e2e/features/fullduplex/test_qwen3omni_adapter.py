@@ -104,3 +104,29 @@ def test_respond_adds_interruption_note_after_barge_in():
     system_messages = [m["content"] for m in request["messages"] if m["role"] == "system"]
     assert any("interrupted" in c for c in system_messages)
     assert INTERRUPTED_MARKER in [m["content"] for m in request["messages"]]
+
+
+def test_on_barge_in_marks_in_flight_turn_interrupted():
+    adapter, session, chat = _make_adapter()
+    adapter._state.record_user_input("hello")
+    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+    adapter._responding.add(session.session_id)
+
+    asyncio.run(adapter.on_barge_in(session))
+
+    assert adapter._state.history[-1] == {"role": "assistant", "content": INTERRUPTED_MARKER}
+    assert adapter._state.last_turn_interrupted is True
+
+
+def test_history_records_audio_user_turn_once():
+    adapter, session, chat = _make_adapter()
+    adapter._state.append_pcm(np.zeros(48000, dtype=np.float32))
+
+    async def drive():
+        return [c async for c in adapter.respond(session)]
+
+    asyncio.run(drive())
+    history = adapter._state.history
+    assert history[0] == {"role": "user", "content": "[audio]"}
+    assert history[1] == {"role": "assistant", "content": " hi "}
+    assert len(history) == 2
