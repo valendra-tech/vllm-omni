@@ -1,4 +1,3 @@
-# vllm_omni/experimental/fullduplex/qwen3omni/adapter.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Turn-based DuplexAdapter for Qwen3-Omni.
@@ -26,8 +25,8 @@ from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
     SYSTEM_PROMPT,
 )
 from vllm_omni.experimental.fullduplex.qwen3omni.session import (
-    Qwen3OmniServingSessionState,
     USER_AUDIO_MARKER,
+    Qwen3OmniServingSessionState,
 )
 
 ChatServiceCall = Callable[[dict[str, Any], Any], Any]
@@ -56,15 +55,12 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
 
     def capabilities(self) -> DuplexCapability:
         return DuplexCapability(
-            input_modalities=frozenset({"audio", "text"}),
+            input_modalities=frozenset({"audio"}),
             output_modalities=frozenset({"audio", "text"}),
             proactive=True,
         )
 
     def _get_state(self, session: DuplexSession) -> Qwen3OmniServingSessionState:
-        injected = self.__dict__.get("_state")
-        if isinstance(injected, Qwen3OmniServingSessionState):
-            return injected
         state = self._states.get(session.session_id)
         if state is None:
             state = Qwen3OmniServingSessionState(sample_rate=self._sample_rate)
@@ -91,7 +87,10 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
         self._responding.add(session.session_id)
         try:
             had_audio = state.pcm.size > 0
-            request = _ChatRequestDict(self._build_request(state))
+            had_interruption = state.last_turn_interrupted
+            request = _ChatRequestDict(
+                self._build_request(state, note_interrupted=had_interruption)
+            )
             result = self._chat_service.create_chat_completion(request, raw_request=None)
             if inspect.isawaitable(result):
                 result = await result
@@ -101,6 +100,8 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
                         if payload == "[DONE]":
                             continue
                         if isinstance(payload, dict):
+                            if isinstance(payload.get("error"), str) or "error" in payload:
+                                raise RuntimeError(payload.get("error") or "chat service error")
                             chunk = _extract_content_chunk(payload)
                             if chunk is None:
                                 continue
@@ -111,27 +112,21 @@ class Qwen3OmniDuplexAdapter(DuplexAdapter):
                                 state.record_partial_text(content)
                                 yield OutputChunk("text", content)
             else:
-                payload = result.model_dump(mode="json", exclude_unset=True) if hasattr(result, "model_dump") else {}
-                chunk = _extract_content_chunk(payload)
-                if chunk is not None:
-                    modality, content = chunk
-                    if modality == "audio":
-                        yield OutputChunk("audio", content)
-                    else:
-                        state.record_partial_text(content)
-                        yield OutputChunk("text", content)
-            final_text = state._assistant_text()
+                raise TypeError("Qwen3OmniDuplexAdapter requires a streaming chat service response")
+            final_text = state.assistant_text()
             if had_audio:
                 state.record_user_input(USER_AUDIO_MARKER)
             state.record_completed_turn(final_text)
+            state.last_turn_interrupted = False
         finally:
             self._responding.discard(session.session_id)
 
-    def _build_request(self, state: Qwen3OmniServingSessionState) -> dict[str, Any]:
+    def _build_request(
+        self, state: Qwen3OmniServingSessionState, *, note_interrupted: bool
+    ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if state.last_turn_interrupted:
+        if note_interrupted:
             messages.append({"role": "system", "content": INTERRUPTION_NOTE})
-            state.last_turn_interrupted = False
         messages.extend(state.history)
         user_part: list[dict[str, Any]] = []
         if state.pcm.size:
