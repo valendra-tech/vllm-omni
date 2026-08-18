@@ -149,6 +149,7 @@ def test_respond_propagates_service_exception():
     adapter = Qwen3OmniDuplexAdapter(_FailingChatService())
     session = DuplexSession(session_id="s1")
     adapter._states["s1"] = Qwen3OmniServingSessionState()
+    adapter._states["s1"].last_turn_interrupted = True
     adapter._states["s1"].append_pcm(np.zeros(48000, dtype=np.float32))
 
     async def drive():
@@ -157,7 +158,7 @@ def test_respond_propagates_service_exception():
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(drive())
     # interrupted flag survives a failed turn
-    assert adapter._states["s1"].last_turn_interrupted is False
+    assert adapter._states["s1"].last_turn_interrupted is True
     assert adapter._states["s1"].history == []
 
 
