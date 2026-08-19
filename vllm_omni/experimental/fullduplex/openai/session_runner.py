@@ -11,7 +11,10 @@ from vllm.logger import init_logger
 
 from vllm_omni.experimental.fullduplex.engine.lease import DuplexLeaseActivity
 from vllm_omni.experimental.fullduplex.engine.messages import DuplexFence
-from vllm_omni.experimental.fullduplex.openai.audio import convert_input_audio_with_rate
+from vllm_omni.experimental.fullduplex.openai.audio import (
+    convert_input_audio_with_rate,
+    pcm_f32le_payload_to_wav,
+)
 from vllm_omni.experimental.fullduplex.openai.commit_policy import (
     CommitAction,
     CommitSnapshot,
@@ -1235,6 +1238,20 @@ class DuplexSessionRunnerMixin:
                     except ValueError as exc:
                         await emit_event({"type": "error", "error": str(exc), "code": "bad_event"})
                         continue
+                    if (
+                        not self._uses_native_input_append(session)
+                        and isinstance(audio, str)
+                        and isinstance(fmt, str)
+                        and fmt.lower() == "pcm_f32le"
+                    ):
+                        try:
+                            audio, fmt, sample_rate_hz = pcm_f32le_payload_to_wav(
+                                audio,
+                                sample_rate_hz if isinstance(sample_rate_hz, int | float) else 16_000,
+                            )
+                        except ValueError as exc:
+                            await emit_event({"type": "error", "error": str(exc), "code": "bad_audio"})
+                            continue
                     if isinstance(fmt, str) and fmt.lower() in {"pcm16", "pcm_s16le", "s16le"}:
                         await emit_event(
                             {
@@ -1490,7 +1507,13 @@ class DuplexSessionRunnerMixin:
                     should_create_response = (
                         event_type == "response.create"
                         or bool(event.get("response_create", event_type == "input.commit"))
-                        or (event_type == "input_audio_buffer.commit" and self._session_auto_responds(session))
+                        or (
+                            event_type == "input_audio_buffer.commit"
+                            and (
+                                self._session_auto_responds(session)
+                                or session.capabilities.implementation_level == "serving_session_adapter"
+                            )
+                        )
                     )
                     precreate_response_requested = event_type == "response.create" or bool(
                         event.get("response_create", event_type == "input.commit")

@@ -30,6 +30,7 @@ def _encode(samples, sample_rate, fmt, speed=None):
 def test_adapter_id_and_capabilities():
     adapter = Qwen3OmniServingRuntimeAdapter(_encode)
     assert adapter.adapter_id == "qwen3omni"
+    assert adapter.supports_runtime_control is False
     caps = adapter.capabilities(max_sessions=1)
     assert caps.supports_model_native_turn_policy is False
     assert caps.supports_client_commit is True
@@ -51,8 +52,8 @@ def test_load_serving_runtime_adapter_validates():
 def test_is_enabled_and_private_keys():
     adapter = Qwen3OmniServingRuntimeAdapter(_encode)
     assert adapter.is_enabled({"session_mode": "duplex"}) is True
-    assert adapter.is_enabled({"session_mode": "turn"}) is False
-    assert adapter.is_enabled(object()) is False
+    assert adapter.is_enabled({"session_mode": "turn"}) is True
+    assert adapter.is_enabled(object()) is True
     assert "auto_commit_silence_ms" in adapter.private_runtime_config_keys
 
 
@@ -86,7 +87,7 @@ class _FakeSessionConfig:
 def test_enabled_and_runtime_config_via_session_config_shape():
     adapter = Qwen3OmniServingRuntimeAdapter(_encode)
     assert adapter.is_enabled(_FakeSessionConfig({"session_mode": "duplex"})) is True
-    assert adapter.is_enabled(_FakeSessionConfig({})) is False
+    assert adapter.is_enabled(_FakeSessionConfig({})) is True
     runtime = asyncio.run(
         adapter.prepare_runtime_config(
             _FakeSessionConfig({"auto_commit_silence_ms": 500}),
