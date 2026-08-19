@@ -33,6 +33,7 @@ class Qwen3OmniServingRuntimeAdapter:
     """Qwen3-Omni serving state, input packing, and output projection."""
 
     adapter_id = "qwen3omni"
+    supports_runtime_control = False
     clean_response_done_prefix = ""
     interrupted_tts_prefix = ""
     private_runtime_config_keys = PRIVATE_RUNTIME_CONFIG_KEYS
@@ -64,12 +65,11 @@ class Qwen3OmniServingRuntimeAdapter:
 
     @staticmethod
     def is_enabled(config: object) -> bool:
-        if isinstance(config, Mapping):
-            return config.get("session_mode") == "duplex"
-        extra_body = getattr(config, "extra_body", None)
-        if isinstance(extra_body, Mapping):
-            return extra_body.get("session_mode") == "duplex"
-        return False
+        # The adapter path is selected by the Qwen3 pipeline. Requiring the
+        # client to repeat the server's session_mode would leave normal
+        # session.create requests on the generic capability profile.
+        del config
+        return True
 
     @staticmethod
     def capabilities(*, max_sessions: int) -> DuplexCapabilities:
