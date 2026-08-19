@@ -458,6 +458,10 @@ class NativeRuntimeBridgeMixin:
         session_config: dict[str, object] | None = None,
         runtime_config: dict[str, object] | None = None,
     ) -> bool:
+        if session.capabilities.implementation_level != "model_native_duplex":
+            # Turn-based adapters (e.g. Qwen3-Omni) run through the chat
+            # fallback; there is no engine-side control plane to signal.
+            return True
         signal_turn = getattr(self._chat_service.engine_client, "signal_duplex_turn_async", None)
         if not callable(signal_turn):
             return True
@@ -505,6 +509,10 @@ class NativeRuntimeBridgeMixin:
         return True
 
     async def _close_runtime_session(self, session: DuplexSession, *, reason: str, send_json=None) -> bool:
+        if session.capabilities.implementation_level != "model_native_duplex":
+            # Turn-based adapters (e.g. Qwen3-Omni) run through the chat
+            # fallback; there is no engine-side control plane to close.
+            return True
         close_session = getattr(self._chat_service.engine_client, "close_duplex_session_async", None)
         if not callable(close_session):
             return True
