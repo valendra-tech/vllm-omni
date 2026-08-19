@@ -924,6 +924,11 @@ class DuplexSessionRunnerMixin:
                         native.input_since_commit = False
                         native.speech_since_commit = False
                         native.clear_committed_audio()
+                        if (
+                            getattr(self._serving_runtime_adapter, "adapter_id", None) == "qwen3omni"
+                            and session.active_response_id is not None
+                        ):
+                            native.last_turn_interrupted = True
                     had_native_append = await actor.cancel_append_tasks(
                         response_bound_only=event_type in {"response.cancel", "output_audio_buffer.clear"},
                     )
