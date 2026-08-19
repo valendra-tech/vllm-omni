@@ -1215,7 +1215,14 @@ class DuplexSessionRunnerMixin:
                                 "cancel",
                             }:
                                 event.pop(key, None)
-                    fmt = event.get("format") if isinstance(event.get("format"), str) else "pcm16"
+                    fmt = (
+                        event.get("format")
+                        or event.get("input_audio_format")
+                        or event.get("audio_format")
+                        or "pcm16"
+                    )
+                    if not isinstance(fmt, str):
+                        fmt = "pcm16"
                     default_sample_rate_hz = 16000
                     sr_raw = event.get("sample_rate_hz") or event.get("sample_rate")
                     sample_rate_hz = sr_raw if isinstance(sr_raw, int | float) else default_sample_rate_hz
