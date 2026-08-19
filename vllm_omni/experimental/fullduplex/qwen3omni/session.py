@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import wave
+from collections.abc import Callable
 from io import BytesIO
 
 import numpy as np
@@ -14,6 +16,42 @@ import numpy as np
 INTERRUPTED_MARKER = "[interrupted]"
 USER_AUDIO_MARKER = "[audio]"
 SAMPLE_RATE = 24000
+
+
+class _NoopPcmAppendReservation:
+    operation_id: str = ""
+    payload: dict[str, object] | None = None
+    active: bool = False
+    byte_count: int = 0
+
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+
+class _NoopPcmAppendBuffer:
+    """Minimal PcmAppendBuffer satisfying the handler's unconditional accesses."""
+
+    pending_byte_count: int = 0
+
+    def clear(self) -> None: ...
+
+    def clear_force_listen(self) -> None: ...
+
+    def has_pending(self) -> bool:
+        return False
+
+    def has_reserved(self) -> bool:
+        return False
+
+    def prepare_append(self, payload, *, operation_id, chunk_period_ms, allow_emit):
+        return None
+
+    def prepare_commit(self, *, operation_id, chunk_period_ms):
+        return _NoopPcmAppendReservation()
+
+    def flush(self, *, chunk_period_ms):
+        return None
 
 
 class Qwen3OmniServingSessionState:
@@ -25,6 +63,21 @@ class Qwen3OmniServingSessionState:
         self.history: list[dict[str, str]] = []
         self.last_turn_interrupted = False
         self._partial_text: list[str] = []
+        self.audio_buffer = _NoopPcmAppendBuffer()
+        self.input_since_commit = False
+        self.speech_since_commit = False
+        self.committed_audio_payload: dict[str, object] | None = None
+        self.committed_audio_operation_id: str | None = None
+        self.committed_audio_reserved_bytes = 0
+        self.deferred_response_create = False
+        self.deferred_precreate_response = False
+        self.data_plane_task: asyncio.Task[None] | None = None
+        self.data_plane_restart_requested = False
+        self.continuation_owner_id: str | None = None
+        self.continuation_units = 0
+        self.pending_silence_task: asyncio.Task[bool] | None = None
+        self.pending_silence_owner_id: str | None = None
+        self.silence_continuation_scheduler: Callable[..., object] | None = None
 
     def append_pcm(self, samples: np.ndarray) -> None:
         samples = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
@@ -63,6 +116,28 @@ class Qwen3OmniServingSessionState:
 
     def assistant_text(self) -> str:
         return "".join(self._partial_text)
+
+    def retain_committed_audio(
+        self,
+        payload: dict[str, object],
+        *,
+        operation_id: str | None,
+        reserved_bytes: int = 0,
+    ) -> None:
+        self.committed_audio_payload = payload
+        self.committed_audio_operation_id = operation_id
+        self.committed_audio_reserved_bytes = reserved_bytes
+
+    def clear_committed_audio(self) -> int:
+        released = self.committed_audio_reserved_bytes
+        self.committed_audio_payload = None
+        self.committed_audio_operation_id = None
+        self.committed_audio_reserved_bytes = 0
+        return released
+
+    def clear_continuation(self) -> None:
+        self.continuation_owner_id = None
+        self.continuation_units = 0
 
 
 def _pcm_to_wav(samples: np.ndarray, sample_rate: int) -> bytes:

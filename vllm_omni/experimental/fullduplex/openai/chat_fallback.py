@@ -75,6 +75,12 @@ class ChatFallbackProjectorMixin:
     def _build_chat_request(self, session: DuplexSession, request_id: str) -> ChatCompletionRequest:
         response_config = session.response_config
         messages: list[dict[str, object]] = []
+        adapter = getattr(self, "_serving_runtime_adapter", None)
+        if adapter is not None and getattr(adapter, "adapter_id", None) == "qwen3omni":
+            policy_messages = adapter.turn_policy_messages(
+                adapter.session_state(session.session_id)
+            )
+            messages.extend(policy_messages)
         if response_config.instructions:
             messages.append({"role": "system", "content": response_config.instructions})
         messages.extend(session.history)
