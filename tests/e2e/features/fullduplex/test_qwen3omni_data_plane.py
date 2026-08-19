@@ -27,7 +27,7 @@ def test_project_maps_audio_and_text_chunks():
             {
                 "request_id": "req-1",
                 "chunks": [
-                    type("C", (), {"modality": "audio", "data": "raw-pcm"}),
+                    type("C", (), {"modality": "audio", "data": "raw-pcm", "sample_rate_hz": 24_000}),
                     type("C", (), {"modality": "text", "data": "hi"}),
                 ],
             },
@@ -64,8 +64,25 @@ def test_project_fails_closed_on_unknown_modality():
 
 def test_project_skips_audio_when_encoder_returns_none():
     plane = Qwen3OmniDataPlaneSession(lambda samples, sample_rate, fmt, speed=None: None)
-    events = list(plane.project(_chunk_result(("audio", "raw-pcm"))))
+    events = list(
+        plane.project(
+            type(
+                "R",
+                (),
+                {
+                    "request_id": "req-1",
+                    "chunks": [type("C", (), {"modality": "audio", "data": "raw-pcm", "sample_rate_hz": 16_000})],
+                },
+            )()
+        )
+    )
     assert events == []
+
+
+def test_project_rejects_audio_without_sample_rate():
+    plane = Qwen3OmniDataPlaneSession(_encode)
+    with pytest.raises(ValueError, match="requires sample_rate_hz"):
+        list(plane.project(_chunk_result(("audio", "raw-pcm"))))
 
 
 def test_is_terminal_none_is_terminal():

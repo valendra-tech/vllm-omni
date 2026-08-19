@@ -1243,16 +1243,6 @@ def test_native_audio_text_marks_are_normalized_to_session_cumulative_offsets():
     assert marks == [{"text_chars": 8, "audio_end_ms": 1000}]
 
 
-def test_duplex_session_playback_accumulates_audio_durations():
-    session = DuplexSession(session_id="sid-audio-duration")
-    session.begin_response()
-    session.mark_audio_sent(500)
-    session.mark_audio_sent(500)
-
-    assert session.playback.generated_ms == 1000
-    assert session.playback.sent_ms == 1000
-
-
 @pytest.mark.asyncio
 async def test_duplex_chat_audio_stream_accumulates_audio_durations():
     handler = OmniDuplexSessionHandler(
@@ -1260,7 +1250,7 @@ async def test_duplex_chat_audio_stream_accumulates_audio_durations():
         config_timeout_s=0.1,
         idle_timeout_s=1,
     )
-    session = DuplexSession(session_id="sid-chat-audio-duration")
+    session = DuplexSession(session_id="sid-chat-audio-duration", config=DuplexSessionConfig())
     response_id = session.begin_response()
     sent: list[dict[str, Any]] = []
 
@@ -1287,8 +1277,8 @@ async def test_duplex_chat_audio_stream_accumulates_audio_durations():
 
     assert session.playback.generated_ms == 1000
     assert session.playback.sent_ms == 1000
-    assert sent[0]["duration_ms"] == 500
-    assert sent[1]["duration_ms"] == 1000
+    assert sent[0]["audio_duration_ms"] == 500
+    assert sent[1]["audio_duration_ms"] == 1000
 
 
 def test_duplex_session_playback_commit_uses_multi_delta_audio_text_marks():

@@ -37,3 +37,9 @@ def test_wav_audio_duration_is_reported_in_milliseconds():
 
     encoded = base64.b64encode(wav.getvalue()).decode("ascii")
     assert _audio_metadata(encoded, fmt="wav") == (1000, 24_000)
+
+
+def test_pcm_audio_without_sample_rate_does_not_guess_metadata():
+    encoded = base64.b64encode(b"\0\0" * 24_000).decode("ascii")
+
+    assert _audio_metadata(encoded, fmt="pcm") == (0, None)

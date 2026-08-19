@@ -36,11 +36,11 @@ class ChatFallbackProjectorMixin:
 
         try:
             request = self._build_chat_request(session, request_id)
+            result = await self._chat_service.create_chat_completion(request, raw_request=None)
             adapter = getattr(self, "_serving_runtime_adapter", None)
             request_issued = getattr(adapter, "on_turn_request_issued", None)
             if callable(request_issued):
                 request_issued(session.session_id, adapter.session_state(session.session_id))
-            result = await self._chat_service.create_chat_completion(request, raw_request=None)
             if isinstance(result, ErrorResponse):
                 error_info = result.error
                 await send_json(
@@ -264,7 +264,7 @@ class ChatFallbackProjectorMixin:
                         audio_event.update(
                             {
                                 "sample_rate_hz": output_sample_rate_hz,
-                                "duration_ms": cumulative_duration_ms,
+                                "audio_duration_ms": cumulative_duration_ms,
                             }
                         )
                     await send_json(audio_event)
@@ -294,7 +294,12 @@ class ChatFallbackProjectorMixin:
                 )
 
 
-def _audio_metadata(audio_base64: str, *, fmt: str, sample_rate_hz: int = 24_000) -> tuple[int, int]:
+def _audio_metadata(
+    audio_base64: str,
+    *,
+    fmt: str,
+    sample_rate_hz: int | None = None,
+) -> tuple[int, int | None]:
     """Return streamed audio duration and sample rate without failing the response."""
     try:
         raw = base64.b64decode(audio_base64, validate=False)
@@ -304,7 +309,7 @@ def _audio_metadata(audio_base64: str, *, fmt: str, sample_rate_hz: int = 24_000
             if pcm16 is None or not wav_rate:
                 return 0, sample_rate_hz
             return round(len(pcm16) * 1000 / (2 * wav_rate)), int(wav_rate)
-        if normalized in {"pcm", "pcm16", "pcm_s16le", "s16le"}:
+        if normalized in {"pcm", "pcm16", "pcm_s16le", "s16le"} and sample_rate_hz is not None:
             return round(len(raw) * 1000 / (2 * sample_rate_hz)), sample_rate_hz
     except (ValueError, wave.Error):
         return 0, sample_rate_hz
@@ -316,7 +321,7 @@ def _normalized_audio_format(response_format: str) -> str:
     return "pcm" if normalized == "pcm16" else normalized
 
 
-def _audio_sample_rate_hint(payload: dict[str, object], choice: dict[str, object]) -> int:
+def _audio_sample_rate_hint(payload: dict[str, object], choice: dict[str, object]) -> int | None:
     for source in (choice, payload, payload.get("metrics")):
         if not isinstance(source, dict):
             continue
@@ -324,4 +329,4 @@ def _audio_sample_rate_hint(payload: dict[str, object], choice: dict[str, object
             value = source.get(key)
             if isinstance(value, int | float) and int(value) > 0:
                 return int(value)
-    return 24_000
+    return None

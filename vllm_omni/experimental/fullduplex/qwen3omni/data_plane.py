@@ -59,7 +59,10 @@ class Qwen3OmniDataPlaneSession:
             modality = getattr(chunk, "modality", "text")
             data = getattr(chunk, "data", "")
             if modality == "audio":
-                encoded = self._encode_audio(data, 24000, "pcm16")
+                sample_rate_hz = getattr(chunk, "sample_rate_hz", getattr(chunk, "sample_rate", None))
+                if not isinstance(sample_rate_hz, int) or sample_rate_hz <= 0:
+                    raise ValueError("Qwen3-Omni compatibility audio output requires sample_rate_hz")
+                encoded = self._encode_audio(data, sample_rate_hz, "pcm16")
                 if encoded is not None:
                     events.append({"type": "response.audio.delta", "audio": encoded})
             elif modality == "text":
