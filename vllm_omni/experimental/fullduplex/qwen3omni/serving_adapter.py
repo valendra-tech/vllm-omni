@@ -16,6 +16,10 @@ from vllm_omni.experimental.fullduplex.qwen3omni.data_plane import (
     Qwen3OmniDataPlaneContext,
     Qwen3OmniDataPlaneSession,
 )
+from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
+    INTERRUPTION_NOTE,
+    SYSTEM_PROMPT,
+)
 from vllm_omni.experimental.fullduplex.qwen3omni.session import (
     Qwen3OmniServingSessionState,
 )
@@ -49,6 +53,14 @@ class Qwen3OmniServingRuntimeAdapter:
 
     def remove_session_state(self, session_id: str) -> None:
         self.session_states.pop(session_id, None)
+
+    @staticmethod
+    def turn_policy_messages(state: Qwen3OmniServingSessionState) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if state.last_turn_interrupted:
+            messages.append({"role": "system", "content": INTERRUPTION_NOTE})
+            state.last_turn_interrupted = False
+        return messages
 
     @staticmethod
     def is_enabled(config: object) -> bool:
