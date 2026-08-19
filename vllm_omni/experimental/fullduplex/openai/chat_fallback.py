@@ -13,6 +13,8 @@ from vllm_omni.experimental.fullduplex.openai.protocol import DuplexSession
 
 logger = init_logger(__name__)
 
+_QWEN3_OMNI_ADAPTER_ID = "qwen3omni"
+
 
 class ChatFallbackProjectorMixin:
     """Project generic chat completion output into duplex response events."""
@@ -76,10 +78,8 @@ class ChatFallbackProjectorMixin:
         response_config = session.response_config
         messages: list[dict[str, object]] = []
         adapter = getattr(self, "_serving_runtime_adapter", None)
-        if adapter is not None and getattr(adapter, "adapter_id", None) == "qwen3omni":
-            policy_messages = adapter.turn_policy_messages(
-                adapter.session_state(session.session_id)
-            )
+        if adapter is not None and getattr(adapter, "adapter_id", None) == _QWEN3_OMNI_ADAPTER_ID:
+            policy_messages = adapter.turn_policy_messages(adapter.session_state(session.session_id))
             messages.extend(policy_messages)
         if response_config.instructions:
             messages.append({"role": "system", "content": response_config.instructions})
