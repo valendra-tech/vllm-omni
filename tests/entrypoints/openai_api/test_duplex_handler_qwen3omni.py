@@ -7,6 +7,10 @@ Runs on the GPU validation host; the local stub tree cannot import the
 handler (vllm dependency).
 """
 
+import base64
+import io
+import wave
+
 import pytest
 
 from tests.entrypoints.openai_api.test_duplex_handler import (
@@ -107,6 +111,60 @@ def test_build_chat_request_skips_policy_for_non_qwen3_adapter():
 
     pairs = _message_pairs(handler._build_chat_request(session, "req-1"))
     assert pairs == [("system", "instr"), ("user", "hi")]
+
+
+@pytest.mark.asyncio
+async def test_qwen3_input_commit_starts_response_without_client_auto_response():
+    handler = _qwen3_handler()
+
+    def on_send(ws: TimedWebSocket, data: dict[str, object]) -> None:
+        if data.get("type") == "response.created":
+            ws.put({"type": "session.close"})
+
+    ws = TimedWebSocket(on_send=on_send)
+    session_create = _session_create("sid-qwen-commit")
+    session_create["session"]["extra_body"] = {}
+    ws.put(session_create)
+    ws.put({"type": "input.text.append", "text": "hello"})
+    ws.put({"type": "input.commit"})
+
+    await handler.handle_session(ws)
+
+    assert ws.sent_types().count("response.created") == 1
+
+
+@pytest.mark.asyncio
+async def test_qwen3_audio_commit_starts_response_without_client_auto_response():
+    handler = _qwen3_handler()
+
+    def on_send(ws: TimedWebSocket, data: dict[str, object]) -> None:
+        if data.get("type") == "response.created":
+            ws.put({"type": "session.close"})
+
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16_000)
+        wav_file.writeframes(b"\0\0" * 160)
+
+    ws = TimedWebSocket(on_send=on_send)
+    session_create = _session_create("sid-qwen-audio-commit")
+    session_create["session"]["extra_body"] = {}
+    ws.put(session_create)
+    ws.put(
+        {
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(wav.getvalue()).decode("ascii"),
+            "input_audio_format": "wav",
+            "sample_rate_hz": 16_000,
+        }
+    )
+    ws.put({"type": "input_audio_buffer.commit", "final": True})
+
+    await handler.handle_session(ws)
+
+    assert ws.sent_types().count("response.created") == 1
 
 
 @pytest.mark.asyncio

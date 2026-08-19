@@ -16,6 +16,5 @@ SYSTEM_PROMPT = (
 )
 
 INTERRUPTION_NOTE = (
-    "Note: your previous reply was interrupted by the user. Discard it.\n"
-    "Respond only to the user's latest input."
+    "Note: your previous reply was interrupted by the user. Discard it.\nRespond only to the user's latest input."
 )

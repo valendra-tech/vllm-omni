@@ -100,16 +100,12 @@ class Qwen3OmniServingRuntimeAdapter:
             return
         for key in PRIVATE_RUNTIME_CONFIG_KEYS:
             if key in extra_body:
-                raise ServingRuntimeConfigError(
-                    f"client cannot set private runtime key: {key}"
-                )
+                raise ServingRuntimeConfigError(f"client cannot set private runtime key: {key}")
 
     @staticmethod
     async def prepare_runtime_config(config: object, *, model_config: Any) -> dict[str, object]:
         runtime: dict[str, object] = {}
-        source: object | None = (
-            config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
-        )
+        source: object | None = config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
         if isinstance(source, Mapping) and "auto_commit_silence_ms" in source:
             runtime["auto_commit_silence_ms"] = source["auto_commit_silence_ms"]
         return runtime
@@ -120,9 +116,7 @@ class Qwen3OmniServingRuntimeAdapter:
         current: Mapping[str, object],
     ) -> dict[str, object]:
         merged = dict(current)
-        source: object | None = (
-            config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
-        )
+        source: object | None = config if isinstance(config, Mapping) else getattr(config, "extra_body", None)
         if isinstance(source, Mapping) and "auto_commit_silence_ms" in source:
             merged["auto_commit_silence_ms"] = source["auto_commit_silence_ms"]
         return merged

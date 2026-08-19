@@ -21,10 +21,17 @@ def test_project_maps_audio_and_text_chunks():
     plane.begin_request("req-1")
 
     def results():
-        yield type("R", (), {"request_id": "req-1", "chunks": [
-            type("C", (), {"modality": "audio", "data": "raw-pcm"}),
-            type("C", (), {"modality": "text", "data": "hi"}),
-        ]})()
+        yield type(
+            "R",
+            (),
+            {
+                "request_id": "req-1",
+                "chunks": [
+                    type("C", (), {"modality": "audio", "data": "raw-pcm"}),
+                    type("C", (), {"modality": "text", "data": "hi"}),
+                ],
+            },
+        )()
 
     events = list(plane.project(next(results())))
     assert events[0]["type"] == "response.audio.delta"
@@ -44,9 +51,9 @@ def test_terminal_lifecycle():
 
 
 def _chunk_result(*items):
-    return type("R", (), {"request_id": "req-1", "chunks": [
-        type("C", (), {"modality": m, "data": d}) for m, d in items
-    ]})()
+    return type(
+        "R", (), {"request_id": "req-1", "chunks": [type("C", (), {"modality": m, "data": d}) for m, d in items]}
+    )()
 
 
 def test_project_fails_closed_on_unknown_modality():
