@@ -13,6 +13,10 @@ from io import BytesIO
 
 import numpy as np
 
+from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+    PcmAppendReservation,
+)
+
 INTERRUPTED_MARKER = "[interrupted]"
 USER_AUDIO_MARKER = "[audio]"
 SAMPLE_RATE = 24000
@@ -44,13 +48,28 @@ class _NoopPcmAppendBuffer:
     def has_reserved(self) -> bool:
         return False
 
-    def prepare_append(self, payload, *, operation_id, chunk_period_ms, allow_emit):
+    def prepare_append(
+        self,
+        payload: dict[str, object],
+        *,
+        operation_id: str,
+        chunk_period_ms: int,
+        allow_emit: bool,
+    ) -> PcmAppendReservation | None:
+        del payload, operation_id, chunk_period_ms, allow_emit
         return None
 
-    def prepare_commit(self, *, operation_id, chunk_period_ms):
+    def prepare_commit(
+        self,
+        *,
+        operation_id: str,
+        chunk_period_ms: int,
+    ) -> PcmAppendReservation:
+        del operation_id, chunk_period_ms
         return _NoopPcmAppendReservation()
 
-    def flush(self, *, chunk_period_ms):
+    def flush(self, *, chunk_period_ms: int) -> dict[str, object] | None:
+        del chunk_period_ms
         return None
 
 

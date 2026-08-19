@@ -50,13 +50,23 @@ def test_session_state_satisfies_protocol_fields():
 
 def test_session_state_satisfies_protocol_structural():
     state = Qwen3OmniServingSessionState()
-    for attr in ("audio_buffer", "input_since_commit", "speech_since_commit",
-                 "committed_audio_payload", "committed_audio_operation_id",
-                 "committed_audio_reserved_bytes", "deferred_response_create",
-                 "deferred_precreate_response", "data_plane_task",
-                 "data_plane_restart_requested", "continuation_owner_id",
-                 "continuation_units", "pending_silence_task",
-                 "pending_silence_owner_id", "silence_continuation_scheduler"):
+    for attr in (
+        "audio_buffer",
+        "input_since_commit",
+        "speech_since_commit",
+        "committed_audio_payload",
+        "committed_audio_operation_id",
+        "committed_audio_reserved_bytes",
+        "deferred_response_create",
+        "deferred_precreate_response",
+        "data_plane_task",
+        "data_plane_restart_requested",
+        "continuation_owner_id",
+        "continuation_units",
+        "pending_silence_task",
+        "pending_silence_owner_id",
+        "silence_continuation_scheduler",
+    ):
         assert hasattr(state, attr), f"missing field: {attr}"
     for meth in ("retain_committed_audio", "clear_committed_audio", "clear_continuation"):
         assert callable(getattr(state, meth)), f"missing method: {meth}"
