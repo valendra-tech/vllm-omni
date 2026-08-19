@@ -42,6 +42,8 @@ from vllm_omni.experimental.fullduplex.openai.websocket import (
 
 logger = init_logger(__name__)
 
+_QWEN3_OMNI_ADAPTER_ID = "qwen3omni"
+
 _MAX_EVENT_BYTES = 15 * 1024 * 1024
 
 
@@ -925,7 +927,7 @@ class DuplexSessionRunnerMixin:
                         native.speech_since_commit = False
                         native.clear_committed_audio()
                         if (
-                            getattr(self._serving_runtime_adapter, "adapter_id", None) == "qwen3omni"
+                            getattr(self._serving_runtime_adapter, "adapter_id", None) == _QWEN3_OMNI_ADAPTER_ID
                             and session.active_response_id is not None
                         ):
                             native.last_turn_interrupted = True
