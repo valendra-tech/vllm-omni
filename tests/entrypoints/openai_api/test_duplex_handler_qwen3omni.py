@@ -120,12 +120,12 @@ async def test_qwen3omni_barge_in_marks_turn_interrupted_with_active_response():
         if data.get("type") == "audio.cancelled":
             state = handler._serving_runtime_adapter.session_states["sid-qwen-barge"]
             observed.append(state.last_turn_interrupted)
+            ws.put({"type": "session.close"})
 
     ws = TimedWebSocket(on_send=on_send)
     ws.put(_session_create("sid-qwen-barge"))
     ws.put({"type": "input.text.append", "text": "hello"})
     ws.put({"type": "input.commit"})
-    ws.put({"type": "session.close"})
 
     await handler.handle_session(ws)
 
