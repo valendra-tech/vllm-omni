@@ -77,7 +77,7 @@ class Qwen3OmniServingRuntimeAdapter:
             supports_model_native_turn_policy=False,
             supports_barge_in=True,
             supports_client_commit=True,
-            supports_input_append=True,
+            supports_input_append=False,
             supports_reencode_context=False,
             supports_turn_commit_only=True,
             supports_realtime_endpoint=True,
