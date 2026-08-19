@@ -17,10 +17,7 @@ from vllm_omni.experimental.fullduplex.qwen3omni.serving_adapter import (
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
-_PATH = (
-    "vllm_omni.experimental.fullduplex.qwen3omni.serving_adapter."
-    "Qwen3OmniServingRuntimeAdapter"
-)
+_PATH = "vllm_omni.experimental.fullduplex.qwen3omni.serving_adapter.Qwen3OmniServingRuntimeAdapter"
 
 
 def _encode(samples, sample_rate, fmt, speed=None):
