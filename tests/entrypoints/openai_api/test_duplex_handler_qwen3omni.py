@@ -112,10 +112,14 @@ def test_build_chat_request_skips_policy_for_non_qwen3_adapter():
 @pytest.mark.asyncio
 async def test_qwen3omni_barge_in_marks_turn_interrupted_with_active_response():
     handler = _qwen3_handler()
+    observed: list[bool] = []
 
     def on_send(ws: TimedWebSocket, data: dict[str, object]) -> None:
         if data.get("type") == "response.created":
             ws.put({"type": "input.cancel", "reason": "test_barge_in"})
+        if data.get("type") == "audio.cancelled":
+            state = handler._serving_runtime_adapter.session_states["sid-qwen-barge"]
+            observed.append(state.last_turn_interrupted)
 
     ws = TimedWebSocket(on_send=on_send)
     ws.put(_session_create("sid-qwen-barge"))
@@ -126,19 +130,26 @@ async def test_qwen3omni_barge_in_marks_turn_interrupted_with_active_response():
     await handler.handle_session(ws)
 
     assert ws.sent_types().count("response.created") == 1
-    state = handler._serving_runtime_adapter.session_states["sid-qwen-barge"]
-    assert state.last_turn_interrupted is True
+    assert observed, "expected to observe audio.cancelled"
+    assert observed[-1] is True
 
 
 @pytest.mark.asyncio
 async def test_qwen3omni_barge_in_without_active_response_does_not_mark_interrupted():
     handler = _qwen3_handler()
-    ws = TimedWebSocket()
+    observed: list[bool] = []
+
+    def on_send(ws: TimedWebSocket, data: dict[str, object]) -> None:
+        if data.get("type") == "input.cancelled":
+            state = handler._serving_runtime_adapter.session_states["sid-qwen-barge-none"]
+            observed.append(state.last_turn_interrupted)
+
+    ws = TimedWebSocket(on_send=on_send)
     ws.put(_session_create("sid-qwen-barge-none"))
     ws.put({"type": "input.cancel", "reason": "no_active_response"})
     ws.put({"type": "session.close"})
 
     await handler.handle_session(ws)
 
-    state = handler._serving_runtime_adapter.session_states["sid-qwen-barge-none"]
-    assert state.last_turn_interrupted is False
+    assert observed, "expected to observe input.cancelled"
+    assert observed[-1] is False
