@@ -30,10 +30,15 @@ PRIVATE_RUNTIME_CONFIG_KEYS = frozenset({"auto_commit_silence_ms"})
 
 
 class Qwen3OmniServingRuntimeAdapter:
-    """Qwen3-Omni serving state, input packing, and output projection."""
+    """Qwen3-Omni adapter selected only by the Qwen3 pipeline wiring.
+
+    ``is_enabled`` is intentionally unconditional because this class must not
+    be attached to another pipeline's ``PipelineConfig``.
+    """
 
     adapter_id = "qwen3omni"
     supports_runtime_control = False
+    auto_respond_on_commit = True
     clean_response_done_prefix = ""
     interrupted_tts_prefix = ""
     private_runtime_config_keys = PRIVATE_RUNTIME_CONFIG_KEYS
@@ -60,8 +65,17 @@ class Qwen3OmniServingRuntimeAdapter:
         messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if state.last_turn_interrupted:
             messages.append({"role": "system", "content": INTERRUPTION_NOTE})
-            state.last_turn_interrupted = False
         return messages
+
+    @staticmethod
+    def on_barge_in(session_id: str, state: Qwen3OmniServingSessionState) -> None:
+        del session_id
+        state.last_turn_interrupted = True
+
+    @staticmethod
+    def on_turn_request_issued(session_id: str, state: Qwen3OmniServingSessionState) -> None:
+        del session_id
+        state.last_turn_interrupted = False
 
     @staticmethod
     def is_enabled(config: object) -> bool:

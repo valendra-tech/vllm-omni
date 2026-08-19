@@ -87,6 +87,8 @@ def test_build_chat_request_injects_policy_once():
     assert pairs2[0] == ("system", SYSTEM_PROMPT)
     assert pairs2[1] == ("system", INTERRUPTION_NOTE)
     assert ("system", "instr") in pairs2
+    assert state.last_turn_interrupted is True
+    handler._serving_runtime_adapter.on_turn_request_issued("sid-policy", state)
     assert state.last_turn_interrupted is False
 
     request3 = handler._build_chat_request(session, "req-3")

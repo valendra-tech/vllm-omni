@@ -86,4 +86,6 @@ def test_turn_policy_messages_injects_prompts_once():
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": INTERRUPTION_NOTE},
     ]
-    assert state.last_turn_interrupted is False, "flag consumed after note injection"
+    assert state.last_turn_interrupted is True
+    adapter.on_turn_request_issued("s1", state)
+    assert state.last_turn_interrupted is False, "flag consumed when request is issued"

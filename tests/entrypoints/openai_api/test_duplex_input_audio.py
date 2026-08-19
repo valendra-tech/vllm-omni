@@ -9,7 +9,7 @@ import wave
 import numpy as np
 
 from vllm_omni.experimental.fullduplex.openai.audio import pcm_f32le_payload_to_wav
-from vllm_omni.experimental.fullduplex.openai.chat_fallback import _audio_duration_ms
+from vllm_omni.experimental.fullduplex.openai.chat_fallback import _audio_metadata
 
 
 def test_pcm_f32le_payload_is_wrapped_as_wav():
@@ -36,4 +36,4 @@ def test_wav_audio_duration_is_reported_in_milliseconds():
         wav_file.writeframes(b"\0\0" * 24_000)
 
     encoded = base64.b64encode(wav.getvalue()).decode("ascii")
-    assert _audio_duration_ms(encoded, fmt="wav") == 1000
+    assert _audio_metadata(encoded, fmt="wav") == (1000, 24_000)
