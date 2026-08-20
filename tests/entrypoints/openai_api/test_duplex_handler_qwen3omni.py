@@ -165,9 +165,7 @@ async def test_chat_rejection_does_not_consume_interruption_marker():
 
     async def reject_chat_completion(request, raw_request=None):
         del request, raw_request
-        return ErrorResponse(
-            error=ErrorInfo(message="rejected", type="BadRequestError", param=None, code=400)
-        )
+        return ErrorResponse(error=ErrorInfo(message="rejected", type="BadRequestError", param=None, code=400))
 
     handler._chat_service.create_chat_completion = reject_chat_completion
     sent: list[dict[str, object]] = []
@@ -178,7 +176,7 @@ async def test_chat_rejection_does_not_consume_interruption_marker():
     await handler._run_response(session, send_json)
 
     assert state.last_turn_interrupted is True
-    assert sent[-1]["code"] == "chat_error"
+    assert sent[-1]["code"] == "BadRequestError"
 
 
 @pytest.mark.asyncio
