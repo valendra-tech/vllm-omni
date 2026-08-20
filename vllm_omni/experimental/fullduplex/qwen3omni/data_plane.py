@@ -25,7 +25,12 @@ class Qwen3OmniDataPlaneContext:
 
 
 class Qwen3OmniDataPlaneSession:
-    """Project Qwen3-Omni duplex output into Realtime contract events."""
+    """Compatibility data plane required by the serving adapter protocol.
+
+    Qwen3 turn-based production output is projected by
+    ``ChatFallbackProjectorMixin``. This projector remains for the shared
+    adapter contract and must not be treated as the live Qwen3 output path.
+    """
 
     def __init__(self, encode_audio: EncodeAudio) -> None:
         self._encode_audio = encode_audio
@@ -54,9 +59,14 @@ class Qwen3OmniDataPlaneSession:
             modality = getattr(chunk, "modality", "text")
             data = getattr(chunk, "data", "")
             if modality == "audio":
-                encoded = self._encode_audio(data, 24000, "pcm16")
+                sample_rate_hz = getattr(chunk, "sample_rate_hz", getattr(chunk, "sample_rate", None))
+                if not isinstance(sample_rate_hz, int) or sample_rate_hz <= 0:
+                    raise ValueError("Qwen3-Omni compatibility audio output requires sample_rate_hz")
+                encoded = self._encode_audio(data, sample_rate_hz, "pcm16")
                 if encoded is not None:
                     events.append({"type": "response.audio.delta", "audio": encoded})
             elif modality == "text":
                 events.append({"type": "response.audio_transcript.delta", "delta": data})
+            else:
+                raise ValueError(f"Unsupported Qwen3-Omni duplex output modality: {modality}")
         return events

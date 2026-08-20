@@ -45,8 +45,6 @@ from vllm_omni.experimental.fullduplex.openai.websocket import (
 
 logger = init_logger(__name__)
 
-_QWEN3_OMNI_ADAPTER_ID = "qwen3omni"
-
 _MAX_EVENT_BYTES = 15 * 1024 * 1024
 
 
@@ -929,11 +927,10 @@ class DuplexSessionRunnerMixin:
                         native.input_since_commit = False
                         native.speech_since_commit = False
                         native.clear_committed_audio()
-                        if (
-                            getattr(self._serving_runtime_adapter, "adapter_id", None) == _QWEN3_OMNI_ADAPTER_ID
-                            and session.active_response_id is not None
-                        ):
-                            native.last_turn_interrupted = True
+                        if session.active_response_id is not None:
+                            on_barge_in = getattr(self._serving_runtime_adapter, "on_barge_in", None)
+                            if callable(on_barge_in):
+                                on_barge_in(session.session_id, native)
                     had_native_append = await actor.cancel_append_tasks(
                         response_bound_only=event_type in {"response.cancel", "output_audio_buffer.clear"},
                     )
@@ -1503,11 +1500,7 @@ class DuplexSessionRunnerMixin:
                         event_type == "response.create"
                         or bool(event.get("response_create", event_type == "input.commit"))
                         or (
-                            event_type == "input_audio_buffer.commit"
-                            and (
-                                self._session_auto_responds(session)
-                                or session.capabilities.implementation_level == "serving_session_adapter"
-                            )
+                            event_type == "input_audio_buffer.commit" and self._serving_adapter_auto_respond_on_commit()
                         )
                     )
                     precreate_response_requested = event_type == "response.create" or bool(
