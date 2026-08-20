@@ -12,6 +12,7 @@ import io
 import wave
 
 import pytest
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 
 from tests.entrypoints.openai_api.test_duplex_handler import (
     FakeChatService,
@@ -113,6 +114,71 @@ def test_build_chat_request_skips_policy_for_non_qwen3_adapter():
 
     pairs = _message_pairs(handler._build_chat_request(session, "req-1"))
     assert pairs == [("system", "instr"), ("user", "hi")]
+
+
+@pytest.mark.asyncio
+async def test_qwen3_rejects_private_runtime_config_at_session_creation():
+    handler = _qwen3_handler()
+    ws = TimedWebSocket()
+    session_create = _session_create("sid-qwen-private-create")
+    session_create["session"]["extra_body"]["auto_commit_silence_ms"] = 300
+    ws.put(session_create)
+
+    await handler.handle_session(ws)
+
+    error = next(message for message in ws.sent if message.get("type") == "error")
+    assert error["code"] == "invalid_duplex_runtime_config"
+
+
+@pytest.mark.asyncio
+async def test_qwen3_rejects_private_runtime_config_at_session_update():
+    handler = _qwen3_handler()
+    ws = TimedWebSocket()
+    ws.put(_session_create("sid-qwen-private-update"))
+    ws.put(
+        {
+            "type": "turn.signal",
+            "event": "session.update",
+            "payload": {"extra_body": {"auto_commit_silence_ms": 300}},
+        }
+    )
+    ws.put({"type": "session.close"})
+
+    await handler.handle_session(ws)
+
+    error = next(message for message in ws.sent if message.get("type") == "error")
+    assert error["code"] == "invalid_duplex_runtime_config"
+    assert "session.updated" not in ws.sent_types()
+
+
+@pytest.mark.asyncio
+async def test_chat_rejection_does_not_consume_interruption_marker():
+    handler = _qwen3_handler()
+    session = DuplexSession(
+        session_id="sid-rejected-turn",
+        config=DuplexSessionConfig(model="test-model"),
+    )
+    session.append_text("hi")
+    session.commit_user_input()
+    state = handler._serving_runtime_adapter.session_state(session.session_id)
+    state.last_turn_interrupted = True
+
+    async def reject_chat_completion(request, raw_request=None):
+        del request, raw_request
+        return ErrorResponse(
+            error=ErrorInfo(message="rejected", type="BadRequestError", param=None, code=400)
+        )
+
+    handler._chat_service.create_chat_completion = reject_chat_completion
+    sent: list[dict[str, object]] = []
+
+    async def send_json(payload: dict[str, object]) -> None:
+        sent.append(payload)
+
+    await handler._run_response(session, send_json)
+
+    assert state.last_turn_interrupted is True
+    assert sent[-1]["code"] == "chat_error"
 
 
 @pytest.mark.asyncio

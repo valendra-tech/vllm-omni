@@ -37,10 +37,6 @@ class ChatFallbackProjectorMixin:
         try:
             request = self._build_chat_request(session, request_id)
             result = await self._chat_service.create_chat_completion(request, raw_request=None)
-            adapter = getattr(self, "_serving_runtime_adapter", None)
-            request_issued = getattr(adapter, "on_turn_request_issued", None)
-            if callable(request_issued):
-                request_issued(session.session_id, adapter.session_state(session.session_id))
             if isinstance(result, ErrorResponse):
                 error_info = result.error
                 await send_json(
@@ -52,6 +48,10 @@ class ChatFallbackProjectorMixin:
                 )
                 session.end_response(commit_text=False)
                 return
+            adapter = getattr(self, "_serving_runtime_adapter", None)
+            request_issued = getattr(adapter, "on_turn_request_issued", None)
+            if callable(request_issued):
+                request_issued(session.session_id, adapter.session_state(session.session_id))
             if hasattr(result, "__aiter__"):
                 await self._drain_streaming_response(session, result, epoch, response_id, send_json)
             else:
