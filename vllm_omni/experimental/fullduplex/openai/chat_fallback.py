@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import pybase64 as base64
 import json
 import wave
 from collections.abc import AsyncGenerator
