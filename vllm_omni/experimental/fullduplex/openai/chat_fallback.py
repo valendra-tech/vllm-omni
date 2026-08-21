@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import pybase64 as base64
 import json
 import wave
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import pybase64 as base64
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.logger import init_logger
