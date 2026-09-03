@@ -1577,6 +1577,32 @@ def test_duplex_session_playback_commit_uses_multi_delta_audio_text_marks():
     assert session.history == (committed,)
 
 
+def test_serving_adapter_auto_respond_on_commit_supports_callable_and_boolean():
+    handler = OmniDuplexSessionHandler(
+        chat_service=FakeChatService(FakeEngineClient()),
+        config_timeout_s=0.1,
+        idle_timeout_s=1,
+        serving_runtime_adapter=PersonaPlexServingRuntimeAdapter(lambda *_: None),
+    )
+    session = DuplexSession(session_id="sid-commit-hook", config=DuplexSessionConfig())
+    state = object()
+    calls: list[tuple[str, object]] = []
+
+    def hook(session_id: str, session_state: object) -> bool:
+        calls.append((session_id, session_state))
+        return False
+
+    handler._serving_runtime_adapter = SimpleNamespace(
+        auto_respond_on_commit=hook,
+        session_state=lambda session_id: state,
+    )
+    assert handler._serving_adapter_auto_respond_on_commit(session) is False
+    assert calls == [(session.session_id, state)]
+
+    handler._serving_runtime_adapter = SimpleNamespace(auto_respond_on_commit=True)
+    assert handler._serving_adapter_auto_respond_on_commit(session) is True
+
+
 @pytest.mark.asyncio
 async def test_duplex_session_actor_preserves_wire_order_before_control():
     ws = TimedWebSocket()

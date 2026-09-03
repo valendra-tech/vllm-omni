@@ -1,10 +1,21 @@
 # tests/e2e/features/fullduplex/test_qwen3omni_handler_integration.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen3-Omni session state satisfies the handler's ServingRuntimeSessionState."""
+"""Qwen3-Omni session state and serving fallback integration tests."""
+
+import base64
 
 import pytest
 
+from tests.entrypoints.openai_api.test_duplex_handler import (
+    FakeChatService,
+    FakeEngineClient,
+)
+from vllm_omni.experimental.fullduplex.openai.protocol import (
+    DuplexSession,
+    DuplexSessionConfig,
+)
+from vllm_omni.experimental.fullduplex.openai.serving import OmniDuplexSessionHandler
 from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
     INTERRUPTION_NOTE,
     SYSTEM_PROMPT,
@@ -74,6 +85,58 @@ def test_session_state_satisfies_protocol_structural():
 
 def _encode(samples, sample_rate, fmt, speed=None):
     return "audio-b64"
+
+
+def _qwen3_handler() -> OmniDuplexSessionHandler:
+    return OmniDuplexSessionHandler(
+        chat_service=FakeChatService(FakeEngineClient()),
+        config_timeout_s=0.1,
+        idle_timeout_s=1,
+        serving_runtime_adapter=Qwen3OmniServingRuntimeAdapter(_encode),
+    )
+
+
+@pytest.mark.asyncio
+async def test_qwen3_chat_fallback_reads_duplex_session_history():
+    handler = _qwen3_handler()
+    session = DuplexSession(
+        session_id="sid-history-live",
+        config=DuplexSessionConfig(model="test-model"),
+    )
+    session.append_text("hello")
+    session.append_audio(
+        base64.b64encode(b"\0\0").decode("ascii"),
+        fmt="wav",
+        sample_rate_hz=16_000,
+    )
+    session.commit_user_input()
+    captured: list[object] = []
+
+    async def create_chat_completion(request, raw_request=None):
+        del raw_request
+        captured.append(request)
+
+        async def stream():
+            if False:
+                yield "data: [DONE]\n\n"
+
+        return stream()
+
+    handler._chat_service.create_chat_completion = create_chat_completion
+    sent: list[dict[str, object]] = []
+
+    async def send_json(payload: dict[str, object]) -> None:
+        sent.append(payload)
+
+    await handler._run_response(session, send_json)
+
+    assert captured
+    messages = captured[0].model_dump()["messages"]
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"][0] == {"type": "text", "text": "hello"}
+    assert messages[-1]["content"][1]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+    assert not hasattr(handler._serving_runtime_adapter.session_state(session.session_id), "history")
+    assert sent[-1]["type"] == "response.done"
 
 
 def test_turn_policy_messages_injects_prompts_once():
