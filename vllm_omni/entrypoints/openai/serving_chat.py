@@ -2775,18 +2775,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if audio_tensor.ndim > 1:
             audio_tensor = audio_tensor.flatten()
 
-        # Prefer the talker-reported sample rate when present. Qwen3-Omni
-        # omits "sr" and runs at 24kHz; Ming-flash-omni surfaces a 44.1kHz
-        # AudioVAE rate via multimodal_output["sr"].
-        sr_raw = mm_output.get("sr")
-        if isinstance(sr_raw, (list, tuple)):
-            sr_raw = next((item for item in sr_raw if item is not None), None)
-        if sr_raw is None:
-            sample_rate = 24000
-        elif hasattr(sr_raw, "item"):
-            sample_rate = int(sr_raw.item())
-        else:
-            sample_rate = int(sr_raw)
+        sample_rate = audio_chunk_sample_rate(omni_outputs)
 
         audio_format = self._resolve_audio_format(request)
         if isinstance(audio_format, ErrorResponse):

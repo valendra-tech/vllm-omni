@@ -19,6 +19,7 @@ Key invariants tested:
 import time
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -30,6 +31,7 @@ from tests.helpers.serving_chat import (
     make_text_omni_output,
     parse_sse_chunks,
 )
+from vllm_omni.entrypoints.openai.protocol.audio import AudioResponse
 from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -179,6 +181,35 @@ async def test_audio_stream_exposes_output_sample_rate():
 
     assert audio_chunks
     assert audio_chunks[0]["sample_rate_hz"] == 24_000
+
+
+def test_audio_choice_uses_same_sample_rate_as_stream_metadata():
+    serving_chat = build_serving_chat()
+    serving_chat._create_audio_choice = OmniOpenAIServingChat._create_audio_choice.__get__(serving_chat)
+    request = make_request(modalities=["audio"])
+    object.__setattr__(request, "audio", {"format": "pcm"})
+
+    audio_tensor = MagicMock()
+    audio_tensor.ndim = 1
+    audio_tensor.detach.return_value = audio_tensor
+    audio_tensor.cpu.return_value = audio_tensor
+    audio_tensor.float.return_value = audio_tensor
+    audio_tensor.numpy.return_value = np.zeros(16_000, dtype=np.float32)
+    omni_output = _make_audio_omni_output(audio_samples=16_000)
+    omni_output.outputs[0].multimodal_output = {
+        "audio": [audio_tensor],
+        "audio_sample_rate": 16_000,
+    }
+    captured = []
+
+    def create_audio(audio):
+        captured.append(audio)
+        return AudioResponse(audio_data="dGVzdA==", media_type="audio/pcm")
+
+    serving_chat.create_audio = create_audio
+    serving_chat._create_audio_choice(omni_output, "assistant", request, stream=True)
+
+    assert captured[0].sample_rate == 16_000
 
 
 @pytest.mark.asyncio
