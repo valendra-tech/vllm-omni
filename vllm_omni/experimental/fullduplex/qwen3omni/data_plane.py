@@ -54,6 +54,4 @@ class Qwen3OmniDataPlaneSession:
 
     def project(self, result: object, *, context: object | None = None) -> Iterable[dict[str, object]]:
         del result, context
-        raise RuntimeError(
-            "Qwen3-Omni serving uses the chat fallback; native data-plane projection is disabled"
-        )
+        raise RuntimeError("Qwen3-Omni serving uses the chat fallback; native data-plane projection is disabled")

@@ -32,11 +32,11 @@ def test_wav_audio_duration_is_reported_in_milliseconds():
     with wave.open(wav, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-        wav_file.setframerate(24_000)
-        wav_file.writeframes(b"\0\0" * 24_000)
+        wav_file.setframerate(16_000)
+        wav_file.writeframes(b"\0\0" * 16_000)
 
     encoded = base64.b64encode(wav.getvalue()).decode("ascii")
-    assert _audio_metadata(encoded, fmt="wav") == (1000, 24_000)
+    assert _audio_metadata(encoded, fmt="wav") == (1000, 16_000)
 
 
 def test_pcm_audio_without_sample_rate_does_not_guess_metadata():

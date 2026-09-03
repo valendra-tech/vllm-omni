@@ -38,7 +38,6 @@ class Qwen3OmniServingRuntimeAdapter:
 
     adapter_id = "qwen3omni"
     supports_runtime_control = False
-    auto_respond_on_commit = True
     clean_response_done_prefix = ""
     interrupted_tts_prefix = ""
     private_runtime_config_keys = PRIVATE_RUNTIME_CONFIG_KEYS
@@ -76,6 +75,14 @@ class Qwen3OmniServingRuntimeAdapter:
     def on_turn_request_issued(session_id: str, state: Qwen3OmniServingSessionState) -> None:
         del session_id
         state.last_turn_interrupted = False
+
+    @staticmethod
+    def auto_respond_on_commit(
+        session_id: str,
+        state: Qwen3OmniServingSessionState,
+    ) -> bool:
+        del session_id, state
+        return True
 
     @staticmethod
     def is_enabled(config: object) -> bool:

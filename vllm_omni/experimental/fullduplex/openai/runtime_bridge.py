@@ -623,9 +623,12 @@ class NativeRuntimeBridgeMixin:
         adapter = getattr(self, "_serving_runtime_adapter", None)
         return getattr(adapter, "supports_runtime_control", True) is not False
 
-    def _serving_adapter_auto_respond_on_commit(self) -> bool:
+    def _serving_adapter_auto_respond_on_commit(self, session: DuplexSession) -> bool:
         adapter = getattr(self, "_serving_runtime_adapter", None)
-        return getattr(adapter, "auto_respond_on_commit", False) is True
+        hook = getattr(adapter, "auto_respond_on_commit", False)
+        if callable(hook):
+            return hook(session.session_id, adapter.session_state(session.session_id)) is True
+        return hook is True
 
     @staticmethod
     def _runtime_control_timeout_s(session: DuplexSession) -> float:

@@ -1640,7 +1640,8 @@ class DuplexSessionRunnerMixin:
                         event_type == "response.create"
                         or bool(event.get("response_create", event_type == "input.commit"))
                         or (
-                            event_type == "input_audio_buffer.commit" and self._serving_adapter_auto_respond_on_commit()
+                            event_type == "input_audio_buffer.commit"
+                            and self._serving_adapter_auto_respond_on_commit(session)
                         )
                     )
                     precreate_response_requested = event_type == "response.create" or bool(

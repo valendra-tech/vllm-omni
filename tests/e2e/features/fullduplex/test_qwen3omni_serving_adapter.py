@@ -54,6 +54,14 @@ def test_is_enabled_and_private_keys():
     assert "auto_commit_silence_ms" in adapter.private_runtime_config_keys
 
 
+def test_adapter_auto_respond_hook():
+    adapter = Qwen3OmniServingRuntimeAdapter(_encode)
+    state = adapter.session_state("s1")
+
+    assert callable(adapter.auto_respond_on_commit)
+    assert adapter.auto_respond_on_commit("s1", state) is True
+
+
 def test_data_plane_context():
     adapter = Qwen3OmniServingRuntimeAdapter(_encode)
     ctx = adapter.data_plane_context(

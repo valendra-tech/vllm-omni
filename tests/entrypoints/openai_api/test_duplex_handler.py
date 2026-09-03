@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
 import struct
-import wave
 from types import SimpleNamespace
 from typing import Any
 
@@ -1528,26 +1526,28 @@ async def test_duplex_chat_audio_stream_accumulates_audio_durations():
         config_timeout_s=0.1,
         idle_timeout_s=1,
     )
-    session = DuplexSession(session_id="sid-chat-audio-duration", config=DuplexSessionConfig())
+    session = DuplexSession(
+        session_id="sid-chat-audio-duration",
+        config=DuplexSessionConfig(response_format="pcm16"),
+    )
     response_id = session.begin_response()
     sent: list[dict[str, Any]] = []
 
     async def send_json(data: dict[str, Any]) -> None:
         sent.append(data)
 
-    def wav_base64(duration_ms: int) -> str:
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(24_000)
-            wav_file.writeframes(b"\0\0" * (24_000 * duration_ms // 1000))
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
+    def pcm_base64(duration_ms: int) -> str:
+        frames = 16_000 * duration_ms // 1000
+        return base64.b64encode(b"\0\0" * frames).decode("ascii")
 
-    for audio in (wav_base64(500), wav_base64(500)):
+    for audio in (pcm_base64(500), pcm_base64(500)):
         await handler._emit_chat_payload(
             session,
-            {"modality": "audio", "choices": [{"delta": {"content": audio}}]},
+            {
+                "modality": "audio",
+                "sample_rate_hz": 16_000,
+                "choices": [{"delta": {"content": audio}}],
+            },
             session.epoch,
             response_id,
             send_json,
