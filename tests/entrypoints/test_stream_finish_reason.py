@@ -159,10 +159,30 @@ async def test_multi_modal_text_audio_only_last_stop():
 @pytest.mark.asyncio
 async def test_audio_stream_exposes_output_sample_rate():
     serving_chat = build_serving_chat()
+    serving_chat._create_audio_choice = OmniOpenAIServingChat._create_audio_choice.__get__(serving_chat)
     request = make_request(modalities=["audio"])
+    audio_tensor = MagicMock()
+    audio_tensor.ndim = 1
+    audio_tensor.numel.return_value = 16_000
+    audio_tensor.detach.return_value = audio_tensor
+    audio_tensor.cpu.return_value = audio_tensor
+    audio_tensor.float.return_value = audio_tensor
+    audio_tensor.numpy.return_value = np.zeros(16_000, dtype=np.float32)
+    encoded_audio = []
+
+    def create_audio(audio):
+        encoded_audio.append(audio)
+        return AudioResponse(audio_data="dGVzdA==", media_type="audio/pcm")
+
+    serving_chat.create_audio = create_audio
 
     async def result_generator():
-        yield _make_audio_omni_output(audio_samples=2400)
+        output = _make_audio_omni_output(audio_samples=16_000)
+        output.outputs[0].multimodal_output = {
+            "audio": [audio_tensor],
+            "audio_sample_rate": 16_000,
+        }
+        yield output
 
     raw_lines = await collect_stream(
         serving_chat.chat_completion_stream_generator(
@@ -180,36 +200,8 @@ async def test_audio_stream_exposes_output_sample_rate():
     audio_chunks = [chunk for chunk in chunks if chunk.get("modality") == "audio" and chunk.get("choices")]
 
     assert audio_chunks
-    assert audio_chunks[0]["sample_rate_hz"] == 24_000
-
-
-def test_audio_choice_uses_same_sample_rate_as_stream_metadata():
-    serving_chat = build_serving_chat()
-    serving_chat._create_audio_choice = OmniOpenAIServingChat._create_audio_choice.__get__(serving_chat)
-    request = make_request(modalities=["audio"])
-    object.__setattr__(request, "audio", {"format": "pcm"})
-
-    audio_tensor = MagicMock()
-    audio_tensor.ndim = 1
-    audio_tensor.detach.return_value = audio_tensor
-    audio_tensor.cpu.return_value = audio_tensor
-    audio_tensor.float.return_value = audio_tensor
-    audio_tensor.numpy.return_value = np.zeros(16_000, dtype=np.float32)
-    omni_output = _make_audio_omni_output(audio_samples=16_000)
-    omni_output.outputs[0].multimodal_output = {
-        "audio": [audio_tensor],
-        "audio_sample_rate": 16_000,
-    }
-    captured = []
-
-    def create_audio(audio):
-        captured.append(audio)
-        return AudioResponse(audio_data="dGVzdA==", media_type="audio/pcm")
-
-    serving_chat.create_audio = create_audio
-    serving_chat._create_audio_choice(omni_output, "assistant", request, stream=True)
-
-    assert captured[0].sample_rate == 16_000
+    assert audio_chunks[0]["sample_rate_hz"] == 16_000
+    assert encoded_audio[0].sample_rate == 16_000
 
 
 @pytest.mark.asyncio
