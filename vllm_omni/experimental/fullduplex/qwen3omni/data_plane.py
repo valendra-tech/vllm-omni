@@ -53,20 +53,7 @@ class Qwen3OmniDataPlaneSession:
             self.mark_terminal(active_request_id)
 
     def project(self, result: object, *, context: object | None = None) -> Iterable[dict[str, object]]:
-        chunks = getattr(result, "chunks", [])
-        events: list[dict[str, object]] = []
-        for chunk in chunks:
-            modality = getattr(chunk, "modality", "text")
-            data = getattr(chunk, "data", "")
-            if modality == "audio":
-                sample_rate_hz = getattr(chunk, "sample_rate_hz", getattr(chunk, "sample_rate", None))
-                if not isinstance(sample_rate_hz, int) or sample_rate_hz <= 0:
-                    raise ValueError("Qwen3-Omni compatibility audio output requires sample_rate_hz")
-                encoded = self._encode_audio(data, sample_rate_hz, "pcm16")
-                if encoded is not None:
-                    events.append({"type": "response.audio.delta", "audio": encoded})
-            elif modality == "text":
-                events.append({"type": "response.audio_transcript.delta", "delta": data})
-            else:
-                raise ValueError(f"Unsupported Qwen3-Omni duplex output modality: {modality}")
-        return events
+        del result, context
+        raise RuntimeError(
+            "Qwen3-Omni serving uses the chat fallback; native data-plane projection is disabled"
+        )
