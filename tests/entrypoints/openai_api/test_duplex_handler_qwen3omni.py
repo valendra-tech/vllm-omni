@@ -65,6 +65,49 @@ def _message_pairs(request) -> list[tuple[str, object]]:
     return [(message["role"], message["content"]) for message in request.model_dump()["messages"]]
 
 
+@pytest.mark.asyncio
+async def test_qwen3_chat_fallback_reads_duplex_session_history():
+    handler = _qwen3_handler()
+    session = DuplexSession(
+        session_id="sid-history-live",
+        config=DuplexSessionConfig(model="test-model"),
+    )
+    session.append_text("hello")
+    session.append_audio(
+        base64.b64encode(b"\0\0").decode("ascii"),
+        fmt="wav",
+        sample_rate_hz=16_000,
+    )
+    session.commit_user_input()
+    captured: list[object] = []
+
+    async def create_chat_completion(request, raw_request=None):
+        del raw_request
+        captured.append(request)
+
+        async def stream():
+            if False:
+                yield "data: [DONE]\n\n"
+
+        return stream()
+
+    handler._chat_service.create_chat_completion = create_chat_completion
+    sent: list[dict[str, object]] = []
+
+    async def send_json(payload: dict[str, object]) -> None:
+        sent.append(payload)
+
+    await handler._run_response(session, send_json)
+
+    assert captured
+    messages = captured[0].model_dump()["messages"]
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"][0] == {"type": "text", "text": "hello"}
+    assert messages[-1]["content"][1]["audio_url"]["url"].startswith("data:audio/wav;base64,")
+    assert not hasattr(handler._serving_runtime_adapter.session_state(session.session_id), "history")
+    assert sent[-1]["type"] == "response.done"
+
+
 def test_build_chat_request_injects_policy_once():
     handler = _qwen3_handler()
     session = DuplexSession(
