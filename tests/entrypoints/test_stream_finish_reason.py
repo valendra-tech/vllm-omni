@@ -155,6 +155,33 @@ async def test_multi_modal_text_audio_only_last_stop():
 
 
 @pytest.mark.asyncio
+async def test_audio_stream_exposes_output_sample_rate():
+    serving_chat = build_serving_chat()
+    request = make_request(modalities=["audio"])
+
+    async def result_generator():
+        yield _make_audio_omni_output(audio_samples=2400)
+
+    raw_lines = await collect_stream(
+        serving_chat.chat_completion_stream_generator(
+            request=request,
+            result_generator=result_generator(),
+            request_id="test-req",
+            model_name="test-model",
+            conversation=[],
+            tokenizer=MagicMock(),
+            request_metadata=MagicMock(),
+        )
+    )
+
+    chunks = parse_sse_chunks(raw_lines)
+    audio_chunks = [chunk for chunk in chunks if chunk.get("modality") == "audio" and chunk.get("choices")]
+
+    assert audio_chunks
+    assert audio_chunks[0]["sample_rate_hz"] == 24_000
+
+
+@pytest.mark.asyncio
 async def test_multi_modal_n2_independent_per_choice():
     """n=2 with text+audio: each choice gets exactly one stop, at the end."""
     serving_chat = build_serving_chat()
