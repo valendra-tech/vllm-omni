@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from vllm_omni.experimental.fullduplex.openai.protocol import DuplexCapabilities
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.protocol import DuplexCapabilities
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
 )
 from vllm_omni.experimental.fullduplex.qwen3omni.data_plane import (

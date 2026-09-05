@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import PcmAppendReservation
+from vllm_omni.entrypoints.duplex.runtime_adapter import PcmAppendReservation
 
 
 class _NoopPcmAppendReservation:
@@ -74,6 +74,7 @@ class Qwen3OmniServingSessionState:
         self.audio_buffer = _NoopPcmAppendBuffer()
         self.input_since_commit = False
         self.speech_since_commit = False
+        self.native_context_locked = False
         self.committed_audio_payload: dict[str, object] | None = None
         self.committed_audio_operation_id: str | None = None
         self.committed_audio_reserved_bytes = 0

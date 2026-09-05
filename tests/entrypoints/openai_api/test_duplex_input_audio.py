@@ -8,8 +8,8 @@ import wave
 
 import numpy as np
 
-from vllm_omni.experimental.fullduplex.openai.audio import pcm_f32le_payload_to_wav
-from vllm_omni.experimental.fullduplex.openai.chat_fallback import _audio_metadata
+from vllm_omni.entrypoints.duplex.audio import pcm_f32le_payload_to_wav
+from vllm_omni.entrypoints.duplex.chat_fallback import _audio_metadata
 
 
 def test_pcm_f32le_payload_is_wrapped_as_wav():

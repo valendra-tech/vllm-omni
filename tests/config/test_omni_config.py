@@ -45,6 +45,7 @@ from vllm_omni.config.stage_config import (
     PipelineConfig,
     StageDeployConfig,
     StageExecutionType,
+    StagePipelineConfig,
     load_deploy_config,
     merge_pipeline_deploy,
 )
@@ -336,6 +337,37 @@ def test_from_pipeline_config_accepts_diffusion_only_cli_fields_for_diffusion_st
 
 def test_stage_cli_field_selection_defers_ownership_validation_until_sources_are_merged():
     assert omni_config_module._stage_cli_overrides(0, {"enable_lora": True}) == {"enable_lora": True}
+
+
+@pytest.mark.parametrize(
+    ("model_type", "diffusion_stage_ids"),
+    [
+        ("bagel", {1}),
+        ("bagel_think", {1}),
+        ("bagel_single_stage", {0}),
+    ],
+)
+def test_step_execution_cli_is_scoped_to_diffusion_stages(model_type, diffusion_stage_ids):
+    omni_config = _from_pipeline_key(model_type, cli_overrides={"step_execution": True})
+
+    for stage in omni_config.stage_configs:
+        if stage.stage_id in diffusion_stage_ids:
+            assert isinstance(stage, VllmOmniDiffusionStageConfig)
+            assert stage.diffusion_config.step_execution is True
+        else:
+            assert not hasattr(stage, "diffusion_config")
+
+
+def test_stage_scoped_step_execution_ignores_bagel_ar_stage():
+    omni_config = _from_pipeline_key(
+        "bagel",
+        cli_overrides={
+            "stage_0_step_execution": True,
+            "stage_1_step_execution": True,
+        },
+    )
+
+    assert omni_config.stage_by_id(1).diffusion_config.step_execution is True
 
 
 def test_runtime_num_gpus_is_derived_from_parallel_world_size():
@@ -1039,7 +1071,10 @@ def test_from_pipeline_config_uses_hf_config_for_callable_resolver():
 
 
 def test_from_pipeline_config_accepts_pre_resolved_pipeline():
-    resolved_pipeline = PipelineConfig(model_type="callable_resolved_variant")
+    resolved_pipeline = PipelineConfig(
+        model_type="callable_resolved_variant",
+        stages=(StagePipelineConfig(stage_id=0, model_stage="a", final_output=True),),
+    )
 
     omni_config = VllmOmniConfig.from_pipeline_config(resolved_pipeline)
 
@@ -1072,6 +1107,7 @@ def test_from_pipeline_config_default_deploy_name_ignores_cwd(monkeypatch, tmp_p
     pipeline = PipelineConfig(
         model_type="pipeline_with_default",
         default_deploy_config_name=default_name,
+        stages=(StagePipelineConfig(stage_id=0, model_stage="a", final_output=True),),
     )
     loaded_paths = []
 

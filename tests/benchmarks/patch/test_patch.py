@@ -16,16 +16,89 @@ import pytest
 from pytest_mock import MockerFixture
 from vllm.benchmarks.lib.endpoint_request_func import RequestFuncInput
 
+from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
+    SeedTTSSampleRequest,
+    SeedTTSTextSampleRequest,
+)
 from vllm_omni.benchmarks.patch.patch import (
     MixRequestFuncOutput,
     _apply_stage0_token_timings,
+    _attach_seed_tts_to_request_func_input,
     async_request_openai_chat_omni_completions,
     async_request_openai_realtime_duplex,
     should_request_stage_metrics,
 )
-from vllm_omni.experimental.fullduplex.client import RealtimeEventCollector
+from vllm_omni.clients.duplex import EventCollector
 
 pytestmark = [pytest.mark.core_model, pytest.mark.benchmark, pytest.mark.cpu]
+
+
+def _seed_tts_request_func_input() -> RequestFuncInput:
+    return RequestFuncInput(
+        model="test-model",
+        model_name="test-model",
+        prompt="target text",
+        api_url="http://test.com/v1/chat/completions",
+        prompt_len=2,
+        output_len=20,
+        extra_body={"modalities": ["text", "audio"]},
+    )
+
+
+def test_seed_tts_chat_request_carries_reference_audio_once() -> None:
+    reference_audio_url = "data:audio/wav;base64,AAAA"
+    sample = SeedTTSSampleRequest(
+        prompt="target text",
+        prompt_len=2,
+        expected_output_len=20,
+        multi_modal_data=None,
+        seed_tts_system_prompt="Clone the supplied voice.",
+        seed_tts_speech_extra={
+            "ref_audio": reference_audio_url,
+            "ref_text": "reference text",
+            "task_type": "Base",
+        },
+    )
+    request_func_input = _seed_tts_request_func_input()
+
+    _attach_seed_tts_to_request_func_input(sample, request_func_input)
+
+    assert request_func_input.omni_chat_messages == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Clone the supplied voice."}],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "target text"}]},
+    ]
+    assert request_func_input.extra_body["ref_audio"] == reference_audio_url
+    serialized_request = json.dumps(
+        {"messages": request_func_input.omni_chat_messages, **request_func_input.extra_body},
+    )
+    assert serialized_request.count(reference_audio_url) == 1
+
+
+def test_seed_tts_text_chat_messages_do_not_add_reference_audio() -> None:
+    sample = SeedTTSTextSampleRequest(
+        prompt="target text",
+        prompt_len=2,
+        expected_output_len=20,
+        multi_modal_data=None,
+        seed_tts_system_prompt="Use the configured voice.",
+        seed_tts_speech_extra=None,
+    )
+    request_func_input = _seed_tts_request_func_input()
+
+    _attach_seed_tts_to_request_func_input(sample, request_func_input)
+
+    assert getattr(request_func_input, "seed_tts_row", False) is True
+    assert request_func_input.omni_chat_messages == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Use the configured voice."}],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "target text"}]},
+    ]
+    assert "ref_audio" not in request_func_input.extra_body
 
 
 class MockResponse:
@@ -58,7 +131,7 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
 
         def __init__(self, url):
             assert url == "ws://localhost:8000/v1/realtime?duplex=1"
-            self.events = RealtimeEventCollector()
+            self.events = EventCollector()
             self.configure_kwargs = None
             self.sent = []
             self.response_count = 0
@@ -133,7 +206,7 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
             return None
 
     monkeypatch.setattr(
-        "vllm_omni.benchmarks.patch.patch.RealtimeDuplexClient",
+        "vllm_omni.benchmarks.patch.patch._RealtimeTTSProbe",
         FakeRealtimeClient,
     )
     request_input = RequestFuncInput(

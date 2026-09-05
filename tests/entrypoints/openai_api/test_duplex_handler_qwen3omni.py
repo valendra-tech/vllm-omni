@@ -19,11 +19,11 @@ from tests.entrypoints.openai_api.test_duplex_handler import (
     FakeEngineClient,
     TimedWebSocket,
 )
-from vllm_omni.experimental.fullduplex.openai.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexSession,
     DuplexSessionConfig,
 )
-from vllm_omni.experimental.fullduplex.openai.serving import OmniDuplexSessionHandler
+from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
     INTERRUPTION_NOTE,
     SYSTEM_PROMPT,

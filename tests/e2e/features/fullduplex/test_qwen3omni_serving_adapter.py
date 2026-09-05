@@ -7,7 +7,7 @@ import asyncio
 
 import pytest
 
-from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
+from vllm_omni.entrypoints.duplex.runtime_adapter import (
     ServingRuntimeConfigError,
     load_serving_runtime_adapter,
 )

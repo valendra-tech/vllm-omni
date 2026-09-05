@@ -11,11 +11,11 @@ from tests.entrypoints.openai_api.test_duplex_handler import (
     FakeChatService,
     FakeEngineClient,
 )
-from vllm_omni.experimental.fullduplex.openai.protocol import (
+from vllm_omni.entrypoints.duplex.protocol import (
     DuplexSession,
     DuplexSessionConfig,
 )
-from vllm_omni.experimental.fullduplex.openai.serving import OmniDuplexSessionHandler
+from vllm_omni.entrypoints.duplex.serving import OmniDuplexSessionHandler
 from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
     INTERRUPTION_NOTE,
     SYSTEM_PROMPT,
@@ -38,6 +38,7 @@ def test_session_state_satisfies_protocol_fields():
     state.audio_buffer.clear()
     assert state.input_since_commit is False
     assert state.speech_since_commit is False
+    assert state.native_context_locked is False
     assert state.committed_audio_payload is None
     assert state.committed_audio_operation_id is None
     assert state.committed_audio_reserved_bytes == 0
@@ -65,6 +66,7 @@ def test_session_state_satisfies_protocol_structural():
         "audio_buffer",
         "input_since_commit",
         "speech_since_commit",
+        "native_context_locked",
         "committed_audio_payload",
         "committed_audio_operation_id",
         "committed_audio_reserved_bytes",
