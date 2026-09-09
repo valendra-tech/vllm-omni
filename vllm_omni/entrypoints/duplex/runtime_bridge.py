@@ -39,7 +39,10 @@ class NativeRuntimeBridgeMixin:
     }
 
     async def _open_runtime_session(self, session: DuplexSession, send_json) -> dict[str, object] | bool:
-        if not self._serving_adapter_uses_runtime_control():
+        # Turn-based sessions use the chat-fallback path and do not own a
+        # model-native duplex runtime.  Do not send control messages merely
+        # because the shared engine client exposes the duplex RPC methods.
+        if not self._uses_serving_runtime_adapter(session.config) or not self._serving_adapter_uses_runtime_control():
             return True
         contract_error = self._native_runtime_contract_error(session)
         if contract_error is not None:
@@ -537,7 +540,7 @@ class NativeRuntimeBridgeMixin:
         session_config: dict[str, object] | None = None,
         runtime_config: dict[str, object] | None = None,
     ) -> bool:
-        if not self._serving_adapter_uses_runtime_control():
+        if not self._uses_serving_runtime_adapter(session.config) or not self._serving_adapter_uses_runtime_control():
             return True
         signal_turn = getattr(self._chat_service.engine_client, "signal_duplex_turn_async", None)
         if not callable(signal_turn):
@@ -586,7 +589,7 @@ class NativeRuntimeBridgeMixin:
         return True
 
     async def _close_runtime_session(self, session: DuplexSession, *, reason: str, send_json=None) -> bool:
-        if not self._serving_adapter_uses_runtime_control():
+        if not self._uses_serving_runtime_adapter(session.config) or not self._serving_adapter_uses_runtime_control():
             return True
         close_session = getattr(self._chat_service.engine_client, "close_duplex_session_async", None)
         if not callable(close_session):
@@ -1318,11 +1321,19 @@ class NativeRuntimeBridgeMixin:
 
     def _cleanup_duplex_session_state(self, session: DuplexSession) -> None:
         session_id = session.session_id
-        self._serving_runtime_adapter.remove_session_state(session_id)
-        self._serving_runtime_adapter.data_plane.close_session(
-            session_id,
-            active_request_id=session.active_request_id,
-        )
+        pipeline = self._server_vad_pipelines.pop(session_id, None)
+        if pipeline is not None:
+            pipeline.reset()
+            self._realtime_vad_metrics.session_finished()
+        adapter = self._serving_runtime_adapter
+        if adapter is None:
+            self._serving_session_states.pop(session_id, None)
+        else:
+            adapter.remove_session_state(session_id)
+            adapter.data_plane.close_session(
+                session_id,
+                active_request_id=session.active_request_id,
+            )
 
     def _encode_native_data_plane_audio(
         self,

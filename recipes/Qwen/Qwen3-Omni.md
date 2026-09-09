@@ -82,7 +82,7 @@ must not be copied into another model pipeline.
 Prefer CLI overrides for day-to-day tuning:
 
 ```bash
-# Disable async chunking when using /v1/realtime
+# Disable async chunking for turn-based duplex
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
   --no-async-chunk
 
@@ -199,11 +199,20 @@ curl http://localhost:8091/v1/chat/completions \
   }'
 ```
 
-Realtime WebSocket check (`/v1/realtime`) requires async chunk disabled:
+Turn-based duplex smoke test (`/v1/duplex`, raw websocket path): use the
+bundled duplex overlay, which sets `session_mode: duplex` and disables async
+chunking:
+
+```bash
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
+  --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml
+```
+
+Then run the raw websocket client against the native duplex endpoint:
 
 ```bash
 python examples/online_serving/qwen3_omni/openai_realtime_client.py \
-  --url ws://localhost:8091/v1/realtime \
+  --url ws://localhost:8091/v1/duplex \
   --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
   --input-wav /path/to/input_16k_mono.wav \
   --output-wav realtime_output.wav
@@ -266,6 +275,6 @@ vllm bench serve \
 
 #### Notes
 
-- `/v1/realtime` is unsupported while `async_chunk` is enabled.
+- The turn-based duplex deployment is unsupported while `async_chunk` is enabled.
 - The default deploy uses `SharedMemoryConnector`; this is for single-host
   stage wiring.
