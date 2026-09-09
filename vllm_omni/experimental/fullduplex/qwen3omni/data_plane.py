@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 EncodeAudio = Callable[[object, int, str, float | None], str | None]
+_MAX_RETAINED_TERMINAL_IDS = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +37,7 @@ class Qwen3OmniDataPlaneSession:
     def __init__(self, encode_audio: EncodeAudio) -> None:
         self._encode_audio = encode_audio
         self._terminal: set[str] = set()
+        self._terminal_order: deque[str] = deque()
 
     def begin_request(self, request_id: str) -> None:
         pass
@@ -43,6 +46,11 @@ class Qwen3OmniDataPlaneSession:
         return request_id is None or request_id in self._terminal
 
     def mark_terminal(self, request_id: str) -> None:
+        if request_id in self._terminal:
+            return
+        if len(self._terminal_order) >= _MAX_RETAINED_TERMINAL_IDS:
+            self._terminal.remove(self._terminal_order.popleft())
+        self._terminal_order.append(request_id)
         self._terminal.add(request_id)
 
     def close_stream(self, request_id: str) -> None:

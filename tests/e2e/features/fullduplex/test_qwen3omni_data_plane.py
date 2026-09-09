@@ -32,6 +32,18 @@ def test_terminal_lifecycle():
     assert plane.is_terminal("req-1") is True
 
 
+def test_terminal_retention_is_bounded_and_keeps_recent_ids():
+    plane = Qwen3OmniDataPlaneSession(_encode)
+    terminal_ids = [f"req-{index}" for index in range(1025)]
+
+    for request_id in terminal_ids:
+        plane.mark_terminal(request_id)
+
+    assert len(plane._terminal) == 1024
+    assert plane.is_terminal(terminal_ids[0]) is False
+    assert plane.is_terminal(terminal_ids[-1]) is True
+
+
 def test_is_terminal_none_is_terminal():
     plane = Qwen3OmniDataPlaneSession(_encode)
     assert plane.is_terminal(None) is True

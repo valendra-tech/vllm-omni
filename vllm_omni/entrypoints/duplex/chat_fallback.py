@@ -37,11 +37,39 @@ class ChatFallbackProjectorMixin:
             )
         )
 
+        async def emit_failed_response_done(reason: str) -> None:
+            if session.epoch != epoch:
+                return
+            await send_json(
+                {
+                    "type": "response.done",
+                    "session_id": session.session_id,
+                    "response_id": response_id,
+                    "epoch": epoch,
+                    "committed": False,
+                    "status": "failed",
+                    "status_details": {"type": "failed", "reason": reason},
+                    "playback": session.playback.as_dict(),
+                }
+            )
+
         try:
             request = self._build_chat_request(session, request_id)
             result = await self._chat_service.create_chat_completion(request, raw_request=None)
+            if isinstance(result, ErrorResponse):
+                error = result.error
+                await send_json(
+                    {
+                        "type": "error",
+                        "error": error.message if error else "Chat request failed",
+                        "code": error.type if error else "chat_error",
+                    }
+                )
+                session.end_response(commit_text=False)
+                await emit_failed_response_done("chat_request_rejected")
+                return
             error_info = getattr(result, "error", None)
-            if isinstance(result, ErrorResponse) or error_info is not None:
+            if error_info is not None:
                 await send_json(
                     {
                         "type": "error",
@@ -50,15 +78,28 @@ class ChatFallbackProjectorMixin:
                     }
                 )
                 session.end_response(commit_text=False)
+                await emit_failed_response_done("chat_request_rejected")
                 return
             adapter = getattr(self, "_serving_runtime_adapter", None)
             request_issued = getattr(adapter, "on_turn_request_issued", None)
             if callable(request_issued):
                 request_issued(session.session_id, adapter.session_state(session.session_id))
             if hasattr(result, "__aiter__"):
-                await self._drain_streaming_response(session, result, epoch, response_id, send_json)
+                projection_failure_reason = await self._drain_streaming_response(
+                    session,
+                    result,
+                    epoch,
+                    response_id,
+                    send_json,
+                )
             else:
-                await self._emit_full_response(session, result, epoch, response_id, send_json)
+                projection_failure_reason = await self._emit_full_response(
+                    session, result, epoch, response_id, send_json
+                )
+            if projection_failure_reason is not None and session.epoch == epoch:
+                session.end_response(commit_text=False)
+                await emit_failed_response_done(projection_failure_reason)
+                return
             if session.epoch == epoch:
                 final_stage_metrics = session.accumulate_response_stage_metrics(None)
                 should_commit = self._should_commit_response_to_history(session, response_id)
@@ -90,6 +131,8 @@ class ChatFallbackProjectorMixin:
                     "code": "response_error",
                 }
             )
+            if session.epoch == epoch:
+                await emit_failed_response_done("response_exception")
 
     def _build_chat_request(self, session: DuplexSession, request_id: str) -> ChatCompletionRequest:
         response_config = session.response_config
@@ -157,15 +200,26 @@ class ChatFallbackProjectorMixin:
         epoch: int,
         response_id: str,
         send_json,
-    ) -> None:
+    ) -> str | None:
         async for raw_chunk in result:
             if session.epoch != epoch:
-                return
+                return None
             for payload in self._parse_sse_payloads(raw_chunk):
                 if payload == "[DONE]":
                     continue
                 if isinstance(payload, dict):
-                    await self._emit_chat_payload(session, payload, epoch, response_id, send_json)
+                    projection_failure_reason = await self._emit_chat_payload(
+                        session,
+                        payload,
+                        epoch,
+                        response_id,
+                        send_json,
+                    )
+                    if session.epoch != epoch:
+                        return None
+                    if projection_failure_reason is not None:
+                        return projection_failure_reason
+        return None
 
     async def _emit_full_response(
         self,
@@ -174,12 +228,12 @@ class ChatFallbackProjectorMixin:
         epoch: int,
         response_id: str,
         send_json,
-    ) -> None:
+    ) -> str | None:
         if hasattr(result, "model_dump"):
             payload = result.model_dump(mode="json", exclude_unset=True)
         else:
             payload = {"response": str(result)}
-        await self._emit_chat_payload(session, payload, epoch, response_id, send_json)
+        return await self._emit_chat_payload(session, payload, epoch, response_id, send_json)
 
     def _parse_sse_payloads(self, raw_chunk: str) -> list[dict[str, object] | str]:
         payloads: list[dict[str, object] | str] = []
@@ -209,11 +263,27 @@ class ChatFallbackProjectorMixin:
         epoch: int,
         response_id: str,
         send_json,
-    ) -> None:
+    ) -> str | None:
         metrics = payload.get("metrics")
         stage_metrics = metrics.get("stage_metrics") if isinstance(metrics, dict) else None
         if isinstance(stage_metrics, dict):
             session.replace_response_stage_metric_snapshots(stage_metrics)
+
+        error_info = payload.get("error")
+        if isinstance(error_info, dict):
+            error_message = error_info.get("message") or str(error_info)
+            error_code = error_info.get("type") or error_info.get("code") or "chat_error"
+            await send_json(
+                {
+                    "type": "error",
+                    "session_id": session.session_id,
+                    "response_id": response_id,
+                    "epoch": epoch,
+                    "code": str(error_code),
+                    "error": str(error_message),
+                }
+            )
+            return str(error_code)
 
         modality = payload.get("modality")
         if modality not in {None, "text", "audio"}:
@@ -227,7 +297,7 @@ class ChatFallbackProjectorMixin:
                     "error": f"Unsupported chat response modality: {modality}",
                 }
             )
-            return
+            return "unsupported_response_modality"
         choices = payload.get("choices")
         if not isinstance(choices, list):
             await send_json(
@@ -239,7 +309,7 @@ class ChatFallbackProjectorMixin:
                     "payload": payload,
                 }
             )
-            return
+            return None
 
         for choice in choices:
             if not isinstance(choice, dict):
@@ -303,6 +373,7 @@ class ChatFallbackProjectorMixin:
                         "modality": modality,
                     }
                 )
+        return None
 
 
 def _audio_metadata(
