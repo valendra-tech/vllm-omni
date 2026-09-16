@@ -216,11 +216,11 @@ async def run_client(
                     print(f"{log_prefix}text usage: {usage}")
                 continue
 
-            if event_type == "response.audio_transcript.done":
+            if event_type == "response.output_audio_transcript.done":
                 final_audio_transcript = event.get("transcript", "")
                 continue
 
-            if event_type in {"response.audio.done", "response.done"}:
+            if event_type in {"response.audio.done", "response.output_audio.done", "response.done"}:
                 break
 
             if event_type == "error":

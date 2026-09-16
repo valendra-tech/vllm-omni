@@ -11,7 +11,7 @@ from typing import Any
 
 import pybase64 as base64
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logger import init_logger
 
 from vllm_omni.entrypoints.duplex.audio import wav_payload_to_pcm16

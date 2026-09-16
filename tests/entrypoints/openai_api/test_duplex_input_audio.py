@@ -7,9 +7,15 @@ import io
 import wave
 
 import numpy as np
+import pytest
 
-from vllm_omni.entrypoints.duplex.audio import pcm_f32le_payload_to_wav
+from vllm_omni.entrypoints.duplex.audio import (
+    encode_float32_mono_wav_base64,
+    pcm_f32le_payload_to_wav,
+)
 from vllm_omni.entrypoints.duplex.chat_fallback import _audio_metadata
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_pcm_f32le_payload_is_wrapped_as_wav():
@@ -25,6 +31,15 @@ def test_pcm_f32le_payload_is_wrapped_as_wav():
         assert wav_file.getsampwidth() == 2
         assert wav_file.getframerate() == 16_000
         assert wav_file.getnframes() == len(samples)
+
+
+def test_pcm_f32le_payload_matches_shared_wav_encoding():
+    samples = np.array([0.5, -0.5], dtype="<f4")
+    payload = base64.b64encode(samples.tobytes()).decode("ascii")
+
+    encoded, _, _ = pcm_f32le_payload_to_wav(payload, 16_000)
+
+    assert encoded == encode_float32_mono_wav_base64(samples, sample_rate_hz=16_000)
 
 
 def test_wav_audio_duration_is_reported_in_milliseconds():

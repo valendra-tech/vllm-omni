@@ -205,15 +205,7 @@ def pcm_f32le_payload_to_wav(
     samples = np.frombuffer(raw, dtype="<f4")
     if not np.isfinite(samples).all():
         raise ValueError("pcm_f32le audio payload contains non-finite samples")
-    pcm16 = np.clip(samples, -1.0, 1.0)
-    pcm16 = (pcm16 * 32767.0).astype("<i2", copy=False).tobytes()
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(rate)
-        wav_file.writeframes(pcm16)
-    return base64.b64encode(output.getvalue()).decode("ascii"), "wav", rate
+    return encode_float32_mono_wav_base64(samples, sample_rate_hz=rate), "wav", rate
 
 
 def convert_output_audio(
