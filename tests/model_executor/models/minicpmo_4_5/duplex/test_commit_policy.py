@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm_omni.entrypoints.duplex.commit_policy import (
+from vllm_omni.engine.duplex.session.commit_policy import (
     CommitAction,
     CommitSnapshot,
     decide_commit_action,
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=True,
                 active_response_id=None,
                 overlap_speech_ms=0,
-                native_response_in_progress=False,
+                response_in_progress=False,
                 playback_active=False,
             ),
             CommitAction.START_AUTO_RESPONSE,
@@ -36,7 +36,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=True,
                 active_response_id=None,
                 overlap_speech_ms=800,
-                native_response_in_progress=True,
+                response_in_progress=True,
                 playback_active=True,
             ),
             CommitAction.START_AUTO_RESPONSE,
@@ -48,7 +48,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=False,
                 active_response_id=None,
                 overlap_speech_ms=0,
-                native_response_in_progress=True,
+                response_in_progress=True,
                 playback_active=False,
             ),
             CommitAction.COMMIT_ONLY,
@@ -60,7 +60,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=True,
                 active_response_id=None,
                 overlap_speech_ms=800,
-                native_response_in_progress=True,
+                response_in_progress=True,
                 playback_active=False,
             ),
             CommitAction.DEFER_ACTIVE_RESPONSE,
@@ -72,7 +72,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=True,
                 active_response_id=None,
                 overlap_speech_ms=800,
-                native_response_in_progress=False,
+                response_in_progress=False,
                 playback_active=True,
             ),
             CommitAction.DEFER_ACTIVE_RESPONSE,
@@ -84,7 +84,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
                 speech_since_commit=True,
                 active_response_id=None,
                 overlap_speech_ms=0,
-                native_response_in_progress=False,
+                response_in_progress=False,
                 playback_active=False,
             ),
             CommitAction.COMMIT_ONLY,
@@ -100,3 +100,16 @@ def test_decide_commit_action_covers_realtime_lifecycle_sequences(
     del case
 
     assert decide_commit_action(snapshot) is expected
+
+
+def test_auto_response_commit_defers_when_an_engine_response_is_active() -> None:
+    snapshot = CommitSnapshot(
+        auto_responds=True,
+        speech_since_commit=True,
+        active_response_id="resp-active",
+        overlap_speech_ms=800,
+        response_in_progress=True,
+        playback_active=True,
+    )
+
+    assert decide_commit_action(snapshot) is CommitAction.DEFER_ACTIVE_RESPONSE

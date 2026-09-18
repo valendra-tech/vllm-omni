@@ -1,379 +1,242 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+"""Pure helpers for the API-side chat-completion fallback."""
+
 from __future__ import annotations
 
-import asyncio
+import base64
 import json
 import wave
-from collections.abc import AsyncGenerator
+from collections.abc import Mapping
 from typing import Any
 
-import pybase64 as base64
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.logger import init_logger
 
-from vllm_omni.entrypoints.duplex.audio import wav_payload_to_pcm16
-from vllm_omni.entrypoints.duplex.protocol import DuplexSession
+from vllm_omni.engine.duplex.audio import pcm_f32le_payload_to_wav, wav_payload_to_pcm16
+from vllm_omni.engine.duplex.fallback import FALLBACK_AUDIO_PAYLOAD_KEY, DuplexFallbackRequest
 
-logger = init_logger(__name__)
+_TOOL_CALL_FRAGMENT_KEY = "_duplex_tool_call_fragment"
+_TOOL_CALL_INDEX_KEY = "_duplex_tool_call_index"
 
 
-class ChatFallbackProjectorMixin:
-    """Project generic chat completion output into duplex response events."""
+class ChatFallbackStreamError(ValueError):
+    """The API-side chat provider returned an invalid SSE record."""
 
-    async def _run_response(self, session: DuplexSession, send_json) -> None:
-        response_id = session.begin_response()
-        epoch = session.epoch
-        request_id = f"duplex-{session.session_id}-{epoch}-{session.input_commit_seq}"
-        session.bind_request(f"chatcmpl-{request_id}")
-        await send_json(
-            self._response_created_payload(
-                session,
-                response_id,
-                epoch=epoch,
-                request_id=session.active_request_id,
-            )
-        )
 
-        async def emit_failed_response_done(reason: str) -> None:
-            if session.epoch != epoch:
-                return
-            await send_json(
-                {
-                    "type": "response.done",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "epoch": epoch,
-                    "committed": False,
-                    "status": "failed",
-                    "status_details": {"type": "failed", "reason": reason},
-                    "playback": session.playback.as_dict(),
-                }
-            )
+def _copy_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _copy_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_copy_json(item) for item in value]
+    return value
 
-        try:
-            request = self._build_chat_request(session, request_id)
-            result = await self._chat_service.create_chat_completion(request, raw_request=None)
-            if isinstance(result, ErrorResponse):
-                error = result.error
-                await send_json(
-                    {
-                        "type": "error",
-                        "error": error.message if error else "Chat request failed",
-                        "code": error.type if error else "chat_error",
-                    }
-                )
-                session.end_response(commit_text=False)
-                await emit_failed_response_done("chat_request_rejected")
-                return
-            error_info = getattr(result, "error", None)
-            if error_info is not None:
-                await send_json(
-                    {
-                        "type": "error",
-                        "error": getattr(error_info, "message", None) or str(result),
-                        "code": getattr(error_info, "type", None) or "chat_error",
-                    }
-                )
-                session.end_response(commit_text=False)
-                await emit_failed_response_done("chat_request_rejected")
-                return
-            adapter = getattr(self, "_serving_runtime_adapter", None)
-            request_issued = getattr(adapter, "on_turn_request_issued", None)
-            if callable(request_issued):
-                request_issued(session.session_id, adapter.session_state(session.session_id))
-            if hasattr(result, "__aiter__"):
-                projection_failure_reason = await self._drain_streaming_response(
-                    session,
-                    result,
-                    epoch,
-                    response_id,
-                    send_json,
-                )
-            else:
-                projection_failure_reason = await self._emit_full_response(
-                    session, result, epoch, response_id, send_json
-                )
-            if projection_failure_reason is not None and session.epoch == epoch:
-                session.end_response(commit_text=False)
-                await emit_failed_response_done(projection_failure_reason)
-                return
-            if session.epoch == epoch:
-                final_stage_metrics = session.accumulate_response_stage_metrics(None)
-                should_commit = self._should_commit_response_to_history(session, response_id)
-                committed_message = session.end_response(commit_text=should_commit)
-                if should_commit:
-                    session.register_history_item(f"item_{response_id}", committed_message)
-                done_payload: dict[str, object] = {
-                    "type": "response.done",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "epoch": epoch,
-                    "committed": committed_message is not None,
-                    "playback": session.playback.as_dict(),
-                }
-                if final_stage_metrics:
-                    done_payload["vllm_omni"] = {"stage_metrics": final_stage_metrics}
-                await send_json(done_payload)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("Duplex response failed: %s", exc)
-            session.end_response(commit_text=False)
-            await send_json(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "error": str(exc),
-                    "code": "response_error",
-                }
-            )
-            if session.epoch == epoch:
-                await emit_failed_response_done("response_exception")
 
-    def _build_chat_request(self, session: DuplexSession, request_id: str) -> ChatCompletionRequest:
-        response_config = session.response_config
-        messages: list[dict[str, object]] = []
-        adapter = getattr(self, "_serving_runtime_adapter", None)
-        if adapter is not None:
-            policy_messages_factory = getattr(adapter, "turn_policy_messages", None)
-        else:
-            policy_messages_factory = None
-        if callable(policy_messages_factory):
-            policy_messages = policy_messages_factory(adapter.session_state(session.session_id))
-            messages.extend(policy_messages)
-        if response_config.instructions:
-            messages.append({"role": "system", "content": response_config.instructions})
-        messages.extend(session.history)
+def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bool]:
+    if isinstance(value, Mapping):
+        replaced = False
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            copied, item_replaced = _replace_audio_placeholder(item, data_uri)
+            result[str(key)] = copied
+            replaced = replaced or item_replaced
+        audio_url = result.get("audio_url")
+        if isinstance(audio_url, dict) and isinstance(audio_url.get("url"), str):
+            if audio_url["url"].startswith("native-duplex:"):
+                result["audio_url"] = {**audio_url, "url": data_uri}
+                replaced = True
+        return result, replaced
+    if isinstance(value, list | tuple):
+        result = []
+        replaced = False
+        for item in value:
+            copied, item_replaced = _replace_audio_placeholder(item, data_uri)
+            result.append(copied)
+            replaced = replaced or item_replaced
+        return result, replaced
+    return value, False
 
-        kwargs: dict[str, Any] = {
-            "model": response_config.model or self._chat_service.model_config.model,
-            "messages": messages,
-            "stream": True,
-        }
-        if response_config.temperature is not None:
-            kwargs["temperature"] = response_config.temperature
-        if response_config.max_tokens is not None:
-            kwargs["max_tokens"] = response_config.max_tokens
-        model_extra = dict(response_config.extra_body)
-        model_extra.pop("native_duplex", None)
-        model_extra.pop("minicpmo45_native_duplex", None)
-        tools = model_extra.pop("realtime_response_tools", model_extra.pop("realtime_tools", None))
-        tool_choice = model_extra.pop(
-            "realtime_response_tool_choice",
-            model_extra.pop("realtime_tool_choice", None),
-        )
-        for protocol_key in (
-            "realtime_response_conversation",
-            "realtime_response_metadata",
-            "realtime_response_prompt",
-        ):
-            model_extra.pop(protocol_key, None)
-        kwargs.update(model_extra)
-        if isinstance(tools, list):
-            kwargs["tools"] = tools
-        if isinstance(tool_choice, str | dict):
-            kwargs["tool_choice"] = tool_choice
 
-        request = ChatCompletionRequest(**kwargs)
-        object.__setattr__(request, "modalities", response_config.modalities)
-        if "audio" in response_config.modalities:
-            audio_format = response_config.response_format.lower()
-            if audio_format == "pcm16":
-                audio_format = "pcm"
-            object.__setattr__(request, "audio", {"format": audio_format})
-        object.__setattr__(request, "request_id", request_id)
-        object.__setattr__(
-            request,
-            "chat_template_kwargs",
-            {"use_tts_template": response_config.use_tts_template},
-        )
-        return request
+def _audio_data_uri(input_payload: Mapping[str, object]) -> str:
+    audio = input_payload.get("audio", input_payload.get("data"))
+    sample_rate_hz = input_payload.get("sample_rate_hz")
+    if not isinstance(audio, str) or not isinstance(sample_rate_hz, int | float):
+        raise ValueError("fallback audio payload must contain base64 audio and sample_rate_hz")
+    wav_audio, fmt, _ = pcm_f32le_payload_to_wav(audio, sample_rate_hz)
+    return f"data:audio/{fmt};base64,{wav_audio}"
 
-    async def _drain_streaming_response(
-        self,
-        session: DuplexSession,
-        result: AsyncGenerator[str, None],
-        epoch: int,
-        response_id: str,
-        send_json,
-    ) -> str | None:
-        async for raw_chunk in result:
-            if session.epoch != epoch:
-                return None
-            for payload in self._parse_sse_payloads(raw_chunk):
-                if payload == "[DONE]":
-                    continue
-                if isinstance(payload, dict):
-                    projection_failure_reason = await self._emit_chat_payload(
-                        session,
-                        payload,
-                        epoch,
-                        response_id,
-                        send_json,
-                    )
-                    if session.epoch != epoch:
-                        return None
-                    if projection_failure_reason is not None:
-                        return projection_failure_reason
-        return None
 
-    async def _emit_full_response(
-        self,
-        session: DuplexSession,
-        result: Any,
-        epoch: int,
-        response_id: str,
-        send_json,
-    ) -> str | None:
-        if hasattr(result, "model_dump"):
-            payload = result.model_dump(mode="json", exclude_unset=True)
-        else:
-            payload = {"response": str(result)}
-        return await self._emit_chat_payload(session, payload, epoch, response_id, send_json)
+def _realtime_extra_body(response_config: Mapping[str, object]) -> dict[str, object]:
+    extra_body = response_config.get("extra_body")
+    model_extra = dict(extra_body) if isinstance(extra_body, Mapping) else {}
+    tools = model_extra.pop("realtime_response_tools", model_extra.pop("realtime_tools", None))
+    tool_choice = model_extra.pop(
+        "realtime_response_tool_choice",
+        model_extra.pop("realtime_tool_choice", None),
+    )
+    for key in list(model_extra):
+        if key.startswith("realtime_") or key in {
+            "native_duplex",
+            "minicpmo45_native_duplex",
+            "auto_response",
+            "full_duplex",
+            "auto_commit_silence_ms",
+        }:
+            model_extra.pop(key)
+    if isinstance(tools, list | tuple):
+        model_extra["tools"] = _copy_json(tools)
+    if isinstance(tool_choice, str | Mapping):
+        model_extra["tool_choice"] = _copy_json(tool_choice)
+    return model_extra
 
-    def _parse_sse_payloads(self, raw_chunk: str) -> list[dict[str, object] | str]:
-        payloads: list[dict[str, object] | str] = []
-        for line in raw_chunk.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if not data:
-                continue
-            if data == "[DONE]":
-                payloads.append(data)
-                continue
-            try:
-                parsed = json.loads(data)
-            except json.JSONDecodeError:
-                logger.debug("Skipping non-JSON duplex stream payload: %s", data)
-                continue
-            if isinstance(parsed, dict):
-                payloads.append(parsed)
-        return payloads
 
-    async def _emit_chat_payload(
-        self,
-        session: DuplexSession,
-        payload: dict[str, object],
-        epoch: int,
-        response_id: str,
-        send_json,
-    ) -> str | None:
-        metrics = payload.get("metrics")
-        stage_metrics = metrics.get("stage_metrics") if isinstance(metrics, dict) else None
-        if isinstance(stage_metrics, dict):
-            session.replace_response_stage_metric_snapshots(stage_metrics)
+def _fallback_history_messages(
+    history: tuple[Mapping[str, object], ...],
+    *,
+    initial_user_text: object,
+) -> list[dict[str, object]]:
+    """Build fallback history from an engine snapshot and insert its seed once.
 
-        error_info = payload.get("error")
-        if isinstance(error_info, dict):
-            error_message = error_info.get("message") or str(error_info)
-            error_code = error_info.get("type") or error_info.get("code") or "chat_error"
-            await send_json(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "epoch": epoch,
-                    "code": str(error_code),
-                    "error": str(error_message),
-                }
-            )
-            return str(error_code)
+    Engine fallback snapshots omit the seeded initial user item from ``history``;
+    the session configuration carries it separately so repeated requests do not
+    mutate or duplicate the canonical native history.
+    """
+    messages = [dict(_copy_json(message)) for message in history]
+    if not isinstance(initial_user_text, str) or not initial_user_text:
+        return messages
+    messages.insert(0, {"role": "user", "content": initial_user_text})
+    return messages
 
-        modality = payload.get("modality")
-        if modality not in {None, "text", "audio"}:
-            await send_json(
-                {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "epoch": epoch,
-                    "code": "unsupported_response_modality",
-                    "error": f"Unsupported chat response modality: {modality}",
-                }
-            )
-            return "unsupported_response_modality"
-        choices = payload.get("choices")
-        if not isinstance(choices, list):
-            await send_json(
-                {
-                    "type": "response.message",
-                    "session_id": session.session_id,
-                    "response_id": response_id,
-                    "epoch": epoch,
-                    "payload": payload,
-                }
-            )
+
+def _restore_history_audio(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Replace each engine-only audio marker with that message's own payload."""
+    restored: list[dict[str, object]] = []
+    for message in messages:
+        payload = message.pop(FALLBACK_AUDIO_PAYLOAD_KEY, None)
+        if payload is not None:
+            if not isinstance(payload, Mapping):
+                raise ValueError("fallback history audio payload must be a mapping")
+            message, _ = _replace_audio_placeholder(message, _audio_data_uri(payload))
+        restored.append(message)
+    return restored
+
+
+def _fallback_output_sample_rate(response_config: Mapping[str, object]) -> int | None:
+    def positive_rate(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
             return None
+        return int(value)
 
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            delta = choice.get("delta")
-            message = choice.get("message")
-            content = None
-            if isinstance(delta, dict):
-                content = delta.get("content")
-            elif isinstance(message, dict):
-                content = message.get("content")
+    for key in ("sample_rate_hz", "sample_rate", "output_sample_rate_hz"):
+        rate = positive_rate(response_config.get(key))
+        if rate is not None:
+            return rate
 
-            if isinstance(content, str) and content:
-                if modality == "audio":
-                    output_format = _normalized_audio_format(session.response_config.response_format)
-                    sample_rate_hint = _audio_sample_rate_hint(payload, choice)
-                    duration_ms, output_sample_rate_hz = _audio_metadata(
-                        content,
-                        fmt=output_format,
-                        sample_rate_hz=sample_rate_hint,
-                    )
-                    cumulative_duration_ms = session.playback.sent_ms + duration_ms
-                    session.mark_audio_sent(cumulative_duration_ms)
-                    audio_event = {
-                        "type": "response.output_audio.delta",
-                        "session_id": session.session_id,
-                        "response_id": response_id,
-                        "epoch": epoch,
-                        "audio": content,
-                        "format": output_format,
-                    }
-                    if duration_ms > 0:
-                        audio_event.update(
-                            {
-                                "sample_rate_hz": output_sample_rate_hz,
-                                "audio_duration_ms": cumulative_duration_ms,
-                            }
-                        )
-                    await send_json(audio_event)
-                else:
-                    session.append_assistant_text(content)
-                    await send_json(
-                        {
-                            "type": "response.text.delta",
-                            "session_id": session.session_id,
-                            "response_id": response_id,
-                            "epoch": epoch,
-                            "delta": content,
-                        }
-                    )
-
-            finish_reason = choice.get("finish_reason")
-            if finish_reason is not None and modality != "audio":
-                await send_json(
-                    {
-                        "type": "response.output_item.done",
-                        "session_id": session.session_id,
-                        "response_id": response_id,
-                        "epoch": epoch,
-                        "finish_reason": finish_reason,
-                        "modality": modality,
-                    }
-                )
+    extra_body = response_config.get("extra_body")
+    session_payload = extra_body.get("realtime_session_payload") if isinstance(extra_body, Mapping) else None
+    if not isinstance(session_payload, Mapping):
         return None
+    audio_config = session_payload.get("audio")
+    audio_output = audio_config.get("output") if isinstance(audio_config, Mapping) else None
+    if isinstance(audio_output, Mapping):
+        for key in ("rate", "sample_rate_hz", "sample_rate", "output_sample_rate_hz"):
+            rate = positive_rate(audio_output.get(key))
+            if rate is not None:
+                return rate
+    return None
+
+
+def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCompletionRequest:
+    """Build a normal chat request from an immutable engine fallback snapshot."""
+    response_config = request.response_config
+    history = [dict(_copy_json(message)) for message in request.history]
+    input_payload = request.input_payload
+    input_is_in_history = input_payload is not None and any(
+        message.get(FALLBACK_AUDIO_PAYLOAD_KEY) == input_payload for message in history
+    )
+    messages: list[dict[str, object]] = [dict(_copy_json(message)) for message in request.policy_messages]
+    instructions = response_config.get("instructions")
+    if isinstance(instructions, str) and instructions:
+        messages.append({"role": "system", "content": instructions})
+    messages.extend(
+        _fallback_history_messages(
+            tuple(history),
+            initial_user_text=response_config.get("initial_user_text"),
+        )
+    )
+    messages = _restore_history_audio(messages)
+
+    if input_payload is not None and not input_is_in_history:
+        data_uri = _audio_data_uri(input_payload)
+        messages, replaced = _replace_audio_placeholder(messages, data_uri)
+        if not replaced:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "audio_url", "audio_url": {"url": data_uri}}],
+                }
+            )
+
+    kwargs: dict[str, Any] = {
+        "model": response_config.get("model") if isinstance(response_config.get("model"), str) else model,
+        "messages": messages,
+        "stream": True,
+    }
+    temperature = response_config.get("temperature")
+    if isinstance(temperature, int | float):
+        kwargs["temperature"] = temperature
+    max_tokens = response_config.get("max_tokens")
+    if isinstance(max_tokens, int):
+        kwargs["max_tokens"] = max_tokens
+    kwargs.update(_realtime_extra_body(response_config))
+
+    chat_request = ChatCompletionRequest(**kwargs)
+    modalities = response_config.get("modalities")
+    if isinstance(modalities, list | tuple):
+        object.__setattr__(chat_request, "modalities", list(modalities))
+    if "audio" in (modalities if isinstance(modalities, list | tuple) else ()):
+        response_format = response_config.get("response_format")
+        audio_format = str(response_format or "wav").lower()
+        if audio_format == "pcm16":
+            audio_format = "pcm"
+        audio_request: dict[str, object] = {"format": audio_format}
+        voice = response_config.get("voice")
+        if isinstance(voice, str) and voice:
+            audio_request["voice"] = voice
+        speed = response_config.get("speed")
+        if isinstance(speed, int | float):
+            audio_request["speed"] = speed
+        object.__setattr__(chat_request, "audio", audio_request)
+    object.__setattr__(chat_request, "request_id", request.request_id)
+    object.__setattr__(
+        chat_request,
+        "chat_template_kwargs",
+        {"use_tts_template": bool(response_config.get("use_tts_template", True))},
+    )
+    return chat_request
+
+
+def parse_sse_payloads(raw_chunk: str) -> list[dict[str, object] | str]:
+    """Parse JSON ``data:`` records from one chat-completion stream chunk."""
+    payloads: list[dict[str, object] | str] = []
+    for line in raw_chunk.splitlines():
+        data = line.strip()
+        if not data.startswith("data:"):
+            continue
+        data = data[5:].strip()
+        if not data:
+            continue
+        if data == "[DONE]":
+            payloads.append(data)
+            continue
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ChatFallbackStreamError("malformed chat fallback SSE payload") from exc
+        if not isinstance(parsed, dict):
+            raise ChatFallbackStreamError("malformed chat fallback SSE payload")
+        payloads.append(parsed)
+    return payloads
 
 
 def _audio_metadata(
@@ -382,7 +245,7 @@ def _audio_metadata(
     fmt: str,
     sample_rate_hz: int | None = None,
 ) -> tuple[int, int | None]:
-    """Return streamed audio duration and sample rate without failing the response."""
+    """Return one audio chunk's duration and effective sample rate."""
     try:
         raw = base64.b64decode(audio_base64, validate=False)
         normalized = fmt.lower()
@@ -398,17 +261,128 @@ def _audio_metadata(
     return 0, sample_rate_hz
 
 
-def _normalized_audio_format(response_format: str) -> str:
-    normalized = response_format.lower()
+def _audio_format(response_format: object) -> str:
+    normalized = str(response_format or "wav").lower()
     return "pcm" if normalized == "pcm16" else normalized
 
 
-def _audio_sample_rate_hint(payload: dict[str, object], choice: dict[str, object]) -> int | None:
-    for source in (choice, payload, payload.get("metrics")):
-        if not isinstance(source, dict):
+def _choice_source(choice: Mapping[str, object]) -> Mapping[str, object]:
+    delta = choice.get("delta")
+    message = choice.get("message")
+    source = delta if isinstance(delta, Mapping) else message if isinstance(message, Mapping) else {}
+    return source if isinstance(source, Mapping) else {}
+
+
+def _choice_content(choice: Mapping[str, object]) -> tuple[object, str]:
+    source = _choice_source(choice)
+    audio = source.get("audio")
+    if isinstance(audio, Mapping):
+        audio = audio.get("data", audio.get("content"))
+    if isinstance(audio, str):
+        return audio, "audio"
+    return source.get("content"), "text"
+
+
+def project_chat_payload(
+    payload: dict[str, object] | str,
+    *,
+    request_id: str,
+    response_format: str = "wav",
+    sample_rate_hz: int | None = None,
+) -> list[dict[str, object]]:
+    """Project a chat chunk into model-neutral output dictionaries.
+
+    This function deliberately has no session or playback side effects; the
+    engine applies the returned dictionaries through ``ModelChannel``.
+    """
+    if payload == "[DONE]":
+        return [{"data_plane_request_id": request_id, "end_of_turn": True}]
+    if isinstance(payload, str):
+        return []
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        return [
+            {
+                "error": str(error.get("message") or error),
+                "error_code": str(error.get("type") or error.get("code") or "chat_error"),
+            }
+        ]
+    modality = payload.get("modality")
+    if modality not in {None, "text", "audio"}:
+        return [
+            {"error": f"Unsupported chat response modality: {modality}", "error_code": "unsupported_response_modality"}
+        ]
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return []
+
+    results: list[dict[str, object]] = []
+    for choice in choices:
+        if not isinstance(choice, Mapping):
             continue
-        for key in ("sample_rate_hz", "audio_sample_rate", "sample_rate", "sr"):
-            value = source.get(key)
-            if isinstance(value, int | float) and int(value) > 0:
-                return int(value)
-    return None
+        source = _choice_source(choice)
+        tool_calls = source.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for fallback_index, tool_call in enumerate(tool_calls):
+                if not isinstance(tool_call, Mapping):
+                    continue
+                function = tool_call.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                result: dict[str, object] = {
+                    "function_call": True,
+                    "data_plane_request_id": request_id,
+                }
+                call_id = tool_call.get("id")
+                name = function.get("name")
+                arguments = function.get("arguments")
+                tool_call_index = tool_call.get("index")
+                if not isinstance(tool_call_index, int) or isinstance(tool_call_index, bool):
+                    tool_call_index = call_id if isinstance(call_id, str) and call_id else fallback_index
+                result[_TOOL_CALL_FRAGMENT_KEY] = True
+                result[_TOOL_CALL_INDEX_KEY] = tool_call_index
+                if isinstance(call_id, str):
+                    result["call_id"] = call_id
+                if isinstance(name, str):
+                    result["name"] = name
+                if isinstance(arguments, str):
+                    result["arguments"] = arguments
+                results.append(result)
+        content, inferred_modality = _choice_content(choice)
+        output_modality = "audio" if modality == "audio" or inferred_modality == "audio" else "text"
+        if not isinstance(content, str) or not content:
+            continue
+        if output_modality == "audio":
+            output_fmt = _audio_format(response_format)
+            hinted_rate = sample_rate_hz
+            for source in (choice, payload, payload.get("metrics")):
+                if not isinstance(source, Mapping):
+                    continue
+                for key in ("sample_rate_hz", "audio_sample_rate", "sample_rate", "sr"):
+                    value = source.get(key)
+                    if isinstance(value, int | float) and int(value) > 0:
+                        hinted_rate = int(value)
+                        break
+                if hinted_rate is not None:
+                    break
+            duration_ms, output_rate = _audio_metadata(content, fmt=output_fmt, sample_rate_hz=hinted_rate)
+            result: dict[str, object] = {
+                "audio": content,
+                "audio_format": output_fmt,
+                "data_plane_request_id": request_id,
+            }
+            if output_rate is not None:
+                result["sample_rate_hz"] = output_rate
+            if duration_ms > 0:
+                result["audio_duration_ms"] = duration_ms
+            results.append(result)
+        else:
+            results.append({"text": content, "data_plane_request_id": request_id})
+    return results
+
+
+__all__ = [
+    "build_chat_request",
+    "ChatFallbackStreamError",
+    "parse_sse_payloads",
+    "project_chat_payload",
+]
