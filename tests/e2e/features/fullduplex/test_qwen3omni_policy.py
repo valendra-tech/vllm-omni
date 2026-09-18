@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm_omni.experimental.fullduplex.qwen3omni.policy import (
+from vllm_omni.model_executor.models.qwen3_omni.duplex.policy import (
     INTERRUPTION_NOTE,
     SYSTEM_PROMPT,
 )

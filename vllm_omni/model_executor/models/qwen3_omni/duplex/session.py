@@ -1,24 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+"""Qwen3-Omni model-owned duplex session state."""
+
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 
 from vllm_omni.engine.duplex.plugin import DuplexModelSessionState
-from vllm_omni.model_executor.models.qwen3_omni.duplex.input import (
-    QwenPcmBuffer,
-)
+from vllm_omni.model_executor.models.qwen3_omni.duplex.input import Qwen3OmniPcmAppendBuffer
 
 
 @dataclass(slots=True)
-class QwenDuplexSessionState(DuplexModelSessionState):
-    """Mutable model-owned state of one Qwen duplex session (owned by the session runner)."""
+class Qwen3OmniDuplexSessionState(DuplexModelSessionState):
+    """Mutable Qwen policy and committed-input state for one engine session."""
 
-    audio_buffer: QwenPcmBuffer = field(default_factory=QwenPcmBuffer)
-    # Keep content objects alongside payloads so identity survives history copies.
-    audio_history: list[tuple[object, dict]] = field(default_factory=list)
+    audio_buffer: Qwen3OmniPcmAppendBuffer = field(default_factory=Qwen3OmniPcmAppendBuffer)
     input_since_commit: bool = False
     speech_since_commit: bool = False
     context_locked: bool = False
@@ -31,6 +29,7 @@ class QwenDuplexSessionState(DuplexModelSessionState):
     continuation_units: int = 0
     pending_silence_task: asyncio.Task[bool] | None = None
     pending_silence_owner_id: str | None = None
+    last_turn_interrupted: bool = False
 
     def retain_committed_audio(
         self,
@@ -57,3 +56,8 @@ class QwenDuplexSessionState(DuplexModelSessionState):
         self.continuation_units = 0
         self.pending_silence_task = None
         self.pending_silence_owner_id = None
+
+
+Qwen3OmniServingSessionState = Qwen3OmniDuplexSessionState
+
+__all__ = ["Qwen3OmniDuplexSessionState", "Qwen3OmniServingSessionState"]
