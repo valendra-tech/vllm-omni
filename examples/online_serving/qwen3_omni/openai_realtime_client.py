@@ -121,13 +121,24 @@ async def run_client(
             "response_format": "pcm",
         }
         if server_vad:
-            session_config["turn_detection"] = {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-                "create_response": True,
-                "interrupt_response": False,
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "model": model,
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 16_000},
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 500,
+                                "create_response": True,
+                                "interrupt_response": True,
+                            },
+                        }
+                    },
+                },
             }
         await ws.send(
             json.dumps(
@@ -220,7 +231,13 @@ async def run_client(
                 final_audio_transcript = event.get("transcript", "")
                 continue
 
-            if event_type in {"response.audio.done", "response.output_audio.done", "response.done"}:
+            if event_type == "response.output_audio.done":
+                if not server_vad:
+                    break
+                continue
+
+            if event_type == "response.done" and server_vad:
+                await ws.send(json.dumps({"type": "session.close"}))
                 break
 
             if event_type == "error":
