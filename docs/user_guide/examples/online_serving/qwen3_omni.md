@@ -22,6 +22,30 @@ both stages on vLLM's Triton unquantized MoE path and avoids the unstable FlashI
 some GPUs.
 Asynchronous chunk streaming is **enabled by default** within the bundled configuration.
 
+The standard launch above is turn-based. To expose the Realtime duplex route
+using Qwen3's engine-resident chat-fallback bridge, select the duplex overlay:
+
+```bash
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
+    --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml
+```
+
+Then run the raw WebSocket client:
+
+```bash
+python examples/online_serving/qwen3_omni/openai_realtime_client.py \
+    --url ws://localhost:8091/v1/duplex \
+    --input-wav input_16k_mono.wav \
+    --output-wav realtime_output.wav
+```
+
+The duplex overlay disables asynchronous chunk streaming because the fallback
+request is created after the committed turn is assembled.
+
+For Thinker pipeline parallelism, configure `pipeline_parallel_size` and `devices`
+on the Thinker stage. Keep Talker and Code2Wav at `pipeline_parallel_size: 1`. The
+default asynchronous scheduling and audio chunk streaming can remain enabled.
+
 To explicitly utilize a custom deployment YAML, specify the configuration path:
 ```bash
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
