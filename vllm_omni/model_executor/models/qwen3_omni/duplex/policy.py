@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Turn-policy prompts for the Qwen3-Omni duplex adapter.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-Qwen3-Omni has no model-native listen/speak tokens (MiniCPM-specific), so the
-turn policy is expressed as a system prompt injected on every turn, plus a
-per-turn interruption note injected only after a barge-in.
-"""
+"""Turn-policy prompts for Qwen3-Omni's chat fallback."""
 
 SYSTEM_PROMPT = (
     "You are a voice assistant in a real-time duplex conversation.\n"
@@ -18,3 +14,5 @@ SYSTEM_PROMPT = (
 INTERRUPTION_NOTE = (
     "Note: your previous reply was interrupted by the user. Discard it.\nRespond only to the user's latest input."
 )
+
+__all__ = ["INTERRUPTION_NOTE", "SYSTEM_PROMPT"]

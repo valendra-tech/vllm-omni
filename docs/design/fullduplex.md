@@ -114,11 +114,10 @@ plugin and the session runtime config to `DuplexOrchestrator` directly.
    `AsyncOmniEngine`, `OrchestratorBase` and `Orchestrator` carry only
    template seams; `tests/engine/test_duplex_import_boundary.py` checks that
    importing the turn-based stack loads no duplex module.
-4. **Deployment selects the serving stack.**
-   `vllm-omni serve` constructs `DuplexOmni` when the pipeline declares
-   `duplex_plugin` and the deploy configuration sets `session_mode: duplex`.
-   An explicit `session_mode: turn` selects `AsyncOmni` instead, without
-   changing the pipeline's duplex capability. In duplex mode the server exposes `/v1/realtime?duplex=1` (alias
+4. **Every surface a duplex server exposes is backed by a session.**
+    `vllm-omni serve` constructs `DuplexOmni` when the pipeline declares
+    `duplex_plugin` and the effective deploy profile sets `session_mode: duplex`;
+    the server exposes `/v1/realtime?duplex=1` (alias
    `/v1/duplex`), `POST /v1/chat/completions`, `/v1/models` and `/health`, and
    every other turn-based route reports "not available". The chat route uses
    the ordinary chat service on the duplex engine, without a session, when
@@ -179,7 +178,7 @@ vllm_omni/
 │   │   ├── realtime_input.py        RealtimeEnvelope (query rules, first message), parse_resume_request
 │   │   ├── session_attachment.py    DuplexSessionAttachmentRegistry (resume tokens, replay journal)
 │   │   ├── audio_encoding.py        encode_audio, injected into DuplexOmniEngine for the plugin's data plane
-│   │   ├── chat_completions.py      DuplexChatCompletionsAdapter (/v1/chat/completions on a session per request)
+    │   │   ├── chat_fallback.py         API-side chat fallback projection helpers
 │   │   └── websocket.py             websocket send/close/receive helpers
 │   └── openai/api_server.py         builds DuplexOmni for duplex models; session-backed app state
 ├── protocol/                        SHARED WIRE CODEC (no engine / no model / no transport)
@@ -373,8 +372,10 @@ config for the worker-side model hooks.
 ## Model plugin
 
 `DuplexModelPlugin` (ABC, `engine/duplex/plugin.py`) is the one class a model
-provides, selected by `PipelineConfig.duplex_plugin`; "is a duplex model" is
-`duplex_plugin is not None`. It merges the engine policy and the session
+provides, selected by `PipelineConfig.duplex_plugin`. A pipeline is served
+through this framework only when its effective deploy configuration also sets
+`session_mode: duplex`; a plugin alone is not sufficient. It merges the engine
+policy and the session
 policy that used to be two separately configured objects:
 
 | Half | Members |
@@ -389,11 +390,14 @@ sampling defaults once the stage pools exist. Plugin hooks that may block
 offloaded from the loop.
 
 The MiniCPM-o 4.5 plugin (`model_executor/models/minicpmo_4_5/duplex/plugin.py`)
-is the only integration in this framework version. PersonaPlex and Nemotron
-VoiceChat still carry their pre-framework duplex code (runtime extension plus
-serving adapter) and are therefore not served over this framework yet: their
-pipelines declare no `duplex_plugin`, so they run turn-based until the
-follow-up PRs port them (RFC vllm-omni#7181, PR 2/3).
+and the Qwen3-Omni plugin (`model_executor/models/qwen3_omni/duplex/plugin.py`)
+are the integrations in this framework version. Qwen3 uses the plugin's
+engine/API chat-fallback bridge rather than a model-native incremental data
+plane. PersonaPlex and Nemotron VoiceChat still carry their pre-framework
+duplex code (runtime extension plus serving adapter) and are therefore not
+served over this framework yet: their pipelines declare no `duplex_plugin`, so
+they run turn-based until the follow-up PRs port them (RFC vllm-omni#7181, PR
+2/3).
 
 ## Serving
 

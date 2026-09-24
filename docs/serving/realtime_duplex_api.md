@@ -9,7 +9,7 @@ This page covers how to run a duplex deployment, how to drive it from Python
 with `vllm_omni.clients.duplex.DuplexClient`, and the complete wire contract.
 
 The endpoint is served for models that ship a duplex plugin — currently
-MiniCPM-o 4.5 only — and just for deploy configurations that declare
+MiniCPM-o 4.5 and Qwen3-Omni — and just for deploy configurations that declare
 `session_mode: duplex`. PersonaPlex and Nemotron VoiceChat are ported to the
 plugin contract in follow-up PRs and are not served over this endpoint yet. The runtime architecture
 is described in [Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md).
@@ -64,9 +64,8 @@ vllm-omni serve Qwen/Qwen3-Omni-30B-A3B-Instruct \
 
 `vllm_omni/deploy/qwen3_omni_duplex.yaml` overlays `qwen3_omni_moe.yaml` with
 `session_mode: duplex`, `async_chunk: false`, and `max_sessions: 1`. The
-duplex serving adapter is selected automatically by the `qwen3_omni_moe`
-pipeline (`PipelineConfig.duplex_serving_adapter`); no `--preset` or
-`ref_audio` is needed.
+engine-resident Qwen3 plugin is selected automatically by the
+`qwen3_omni_moe` pipeline; no `--preset` or `ref_audio` is needed.
 
 Connect with the model-neutral `SessionConfig` (no `native_duplex` flag):
 
@@ -90,8 +89,8 @@ async with DuplexClient(
 ```
 
 `DuplexClient` uses the Realtime compatibility route shown above. The raw
-`/v1/duplex` dialect expects `session.create` and is used by the raw websocket
-example and Qwen recipe smoke test.
+`/v1/duplex` alias uses the same protocol and the raw WebSocket example sends
+`session.update` before streaming audio.
 
 Input WAVs must be mono 16 kHz PCM16. Barge-in is supported: sending
 `input.cancel` or new audio while a response is active marks the turn as
@@ -411,19 +410,19 @@ with no OpenAI counterpart.
 
 The event vocabulary is uniform, but several surfaces are gated by the
 `capabilities` object the server returns in `session.created`; a client must
-branch on those flags rather than on the model name. MiniCPM-o 4.5 is the
-only model on the plugin contract today; the other two columns record what
-their integrations advertise once the follow-up PRs port them:
+branch on those flags rather than on the model name. MiniCPM-o 4.5 uses the
+model-native lane, while Qwen3-Omni uses the turn-based chat-fallback lane.
+PersonaPlex and Nemotron VoiceChat are not served over this endpoint yet:
 
-| Capability | MiniCPM-o 4.5 | PersonaPlex | Nemotron VoiceChat | Gated surface |
-| --- | --- | --- | --- | --- |
-| `implementation_level` | `model_native_duplex` | `model_native_duplex` | `model_native_duplex` | model-owned `response.listen` / `response.speak` (constant: every duplex model is model-native) |
-| `chunk_period_ms` | 1000 | 80 | 80 | the model unit that `response.listen` decisions and camera frames align to |
-| `supports_session_resume` | yes | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
-| `supports_barge_in` | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, `overlap_policy=barge_in_on_speech`, `turn_detection.server_vad` |
-| `supports_audio_truncate` | yes | no | no | `conversation.item.truncate` and truncating `playback.ack` adjusting the stored assistant item |
-| video input (`video_frames` on append) | consumed by Stage 0 | ignored | ignored | omni camera track |
-| tool calls | no | no | yes | `response.function_call_arguments.*`, `function_call` items |
+| Capability | MiniCPM-o 4.5 | Qwen3-Omni | PersonaPlex | Nemotron VoiceChat | Gated surface |
+| --- | --- | --- | --- | --- | --- |
+| `implementation_level` | `model_native_duplex` | `chat_fallback` | `model_native_duplex` | `model_native_duplex` | model- or engine-owned turn handling |
+| `chunk_period_ms` | 1000 | n/a (turn commit) | 80 | 80 | the model unit that native `response.listen` decisions and camera frames align to |
+| `supports_session_resume` | yes | no | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
+| `supports_barge_in` | yes | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, overlap handling |
+| `supports_audio_truncate` | yes | no | no | no | `conversation.item.truncate` and truncating `playback.ack` adjusting the stored assistant item |
+| video input (`video_frames` on append) | consumed by Stage 0 | not supported | ignored | ignored | omni camera track |
+| tool calls | no | yes (chat fallback) | no | yes | `response.function_call_arguments.*`, `function_call` items |
 
 Everything else in the catalogue — session lifecycle, heartbeat and event
 acknowledgement, append/commit/clear, the response envelope, playback
@@ -474,9 +473,12 @@ Semantic divergences hidden behind shared names:
   before any commit; a commit may end in `response.listen` and no
   response, and the model may open a response with no commit at all.
   OpenAI: commit ⇒ item, `response.create` ⇒ exactly one response.
-- `turn_detection.interrupt_response=false` is rejected;
-  `create_response` is ignored; `semantic_vad` is unsupported; the VAD
-  runs per session (Silero) and implies `overlap_policy=barge_in_on_speech`.
+- Native model sessions reject `turn_detection.interrupt_response=false` and
+  ignore `create_response`; Qwen3-Omni's chat-fallback session accepts
+  `interrupt_response=false` (the default) and maps it to
+  `overlap_policy=listen_only`. `semantic_vad` is unsupported; the VAD runs
+  per session (Silero), and native server-VAD otherwise implies
+  `overlap_policy=barge_in_on_speech`.
 - `rate_limits.updated` is always an empty list (compatibility only).
 - Cancellation never reuses a `response_id`; truncation is driven by
   `playback.ack` as well as `conversation.item.truncate`.
@@ -1361,25 +1363,29 @@ them out into typed events before they reach a client.
 
 ## Known Limitations
 
-- Only MiniCPM-o 4.5 is served over this endpoint today; PersonaPlex and
-  Nemotron VoiceChat arrive with the follow-up PRs that port them to the
+- MiniCPM-o 4.5 and Qwen3-Omni are served over this endpoint today; PersonaPlex
+  and Nemotron VoiceChat arrive with the follow-up PRs that port them to the
   plugin contract.
 - Several surfaces are capability-gated per model (see *Capability
   negotiation by model* above): PersonaPlex does not support session resume,
   barge-in, or audio truncation; Nemotron VoiceChat does not support barge-in
   or audio truncation; camera frames are consumed only by MiniCPM-o 4.5; tool
-  calls are produced only by Nemotron VoiceChat.
-- A response is generated from committed **audio**, so the OpenAI text-prompt
-  shape does not drive one: `conversation.item.create` with an `input_text`
-  part adds the item to history, but a following `response.create` with no
-  committed audio is rejected with `response_create_without_input`, and
-  `input.text.append` is rejected with `native_text_append_unsupported`.
+  calls are produced by Qwen3-Omni's chat fallback and Nemotron VoiceChat.
+- In the native model lane, a response is generated from committed **audio**,
+  so the OpenAI text-prompt shape does not drive one:
+  `conversation.item.create` with an `input_text` part adds the item to
+  history, but a following `response.create` with no committed audio is
+  rejected with `response_create_without_input`, and `input.text.append` is
+  rejected with `native_text_append_unsupported`.
   Text-to-speech has its own shape here — put the text in
   `extra_body.duplex_initial_user_text` on `session.update`, then stream audio
   units (silence is enough). The seeded turn is what the model answers.
-- `turn_detection` supports only `server_vad` with `interrupt_response=true`;
-  `semantic_vad`, `interrupt_response=false`, and `create_response` are not
-  supported.
+- Native model sessions support only `server_vad` with
+  `interrupt_response=true`; Qwen3-Omni's turn-based fallback also accepts
+  `interrupt_response=false` and honors `create_response` when Server VAD
+  commits a turn. `semantic_vad` remains unsupported, and
+  `turn_detection=null` disables Server VAD and leaves turn boundaries to the
+  model/client path.
 - `input_audio_transcription` and `input_audio_noise_reduction` are accepted
   and echoed but no separate transcription or noise-reduction stage runs;
   transcripts come from the model.
