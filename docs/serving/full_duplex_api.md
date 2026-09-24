@@ -22,10 +22,9 @@ capability gates, see the [Realtime Duplex API guide](realtime_duplex_api.md).
 ## Enable Full Duplex
 
 A model is served full duplex when its registered pipeline declares a
-`duplex_plugin` (the model's `DuplexModelPlugin`) and the effective deploy
-configuration sets `session_mode: duplex`. `vllm-omni serve` then constructs
-`DuplexOmni` instead of `AsyncOmni`, and every surface the server exposes is
-backed by a duplex session. It serves
+`duplex_plugin` (the model's `DuplexModelPlugin`) and its deploy configuration
+sets `session_mode: duplex`. `vllm serve --omni` constructs `DuplexOmni`
+instead of `AsyncOmni`. It serves
 `/v1/realtime?duplex=1` (and its alias `/v1/duplex`),
 `POST /v1/chat/completions`, `/v1/models` and `/health`; every other
 turn-based HTTP route (speech, batch, embeddings, video, ...) answers "not
@@ -46,9 +45,24 @@ The deploy configuration of such a model must agree:
 session_mode: duplex
 ```
 
-A pipeline that declares a plugin but is started with a deploy configuration
-whose `session_mode` is not `duplex` remains on the ordinary turn-based server.
-Only the plugin-plus-duplex combination selects `DuplexOmni`.
+A duplex-capable model must explicitly set `session_mode` to `duplex` or `turn`
+in its deploy configuration, possibly through `base_config` inheritance.
+Missing or invalid values fail at startup. The default MiniCPM-o deployment
+continues to use duplex mode.
+
+To run MiniCPM-o 4.5 with the turn-based engine:
+
+```bash
+vllm serve openbmb/MiniCPM-o-4_5 --omni \
+  --deploy-config vllm_omni/deploy/minicpmo_4_5_turn.yaml \
+  --trust-remote-code \
+  --port 8091
+```
+
+This profile inherits the default model and stage settings and overrides only
+`session_mode`. It supports ordinary HTTP requests without creating a duplex
+session handler. Mode selection happens at startup; a WebSocket query parameter
+does not switch engines. The Python `Omni` / `AsyncOmni` APIs are unchanged.
 
 !!! warning
 
@@ -58,9 +72,8 @@ Only the plugin-plus-duplex combination selects `DuplexOmni`.
     `session.created.session.capabilities` is present before treating the
     connection as full duplex.
 
-**MiniCPM-o 4.5** (`vllm_omni/deploy/minicpmo_4_5.yaml`) and **Qwen3-Omni**
-(`vllm_omni/deploy/qwen3_omni_duplex.yaml`) are served over this endpoint today.
-PersonaPlex and Nemotron VoiceChat still carry
+**MiniCPM-o 4.5** (`vllm_omni/deploy/minicpmo_4_5.yaml`) is the only model
+served over this endpoint today. PersonaPlex and Nemotron VoiceChat still carry
 their pre-framework duplex code: their pipelines declare no `duplex_plugin`, so
 they run turn-based until the follow-up PRs port them to the plugin contract
 (RFC [vllm-omni#7181](https://github.com/vllm-project/vllm-omni/issues/7181)).

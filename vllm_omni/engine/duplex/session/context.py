@@ -58,8 +58,6 @@ class DuplexRunState:
     runtime_closed: bool = False
     #: Request id of the resumable data-plane stream currently bound to the session.
     stream_request_id: str | None = None
-    #: Request id of the API-side chat fallback currently bound to the session.
-    fallback_request_id: str | None = None
 
 
 class RunnerServices(Protocol):

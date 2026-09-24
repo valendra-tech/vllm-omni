@@ -161,19 +161,9 @@ def translate_realtime_command(
     if event_type == "session.update":
         session = payload.get("session")
         session_payload: Mapping[str, object] = session if isinstance(session, dict) else payload
-        format_error = validate_realtime_session_audio_formats(session_payload)
-        if format_error is not None:
-            raise DuplexCommandError(format_error, code="unsupported_audio_format", event_id=event_id)
-        from vllm_omni.engine.duplex.turn_detection import validate_realtime_turn_detection
-
-        # Model-specific capability checks run in the engine after the session
-        # is known; the transport only validates the shared payload shape.
-        turn_detection_error = validate_realtime_turn_detection(
-            session_payload,
-            allow_interrupt_response_false=True,
-        )
-        if turn_detection_error is not None:
-            raise DuplexCommandError(turn_detection_error, code="unsupported_turn_detection", event_id=event_id)
+        rejection = validate_session_payload(session_payload, capabilities=DUPLEX_REALTIME_CAPABILITIES)
+        if rejection is not None:
+            raise DuplexCommandError(rejection.message, code=rejection.code, event_id=event_id)
         return UpdateSession(event_id=event_id, patch=dict(session_payload))
 
     if event_type == "conversation.item.create":

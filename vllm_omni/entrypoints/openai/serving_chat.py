@@ -6,7 +6,7 @@ import base64
 import json
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -1004,7 +1004,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         await self._attach_minicpmo45_reference_audio(engine_prompt, request)
 
-        speaker = self._resolve_chat_speaker(request)
+        speaker = getattr(request, "voice", None) or getattr(request, "speaker", None)
         normalized = validate_requested_speaker(speaker, self._get_supported_speakers())
         if normalized is not None:
             prompt_additional_information = self._ensure_prompt_additional_information(engine_prompt)
@@ -1033,18 +1033,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             additional_information = {}
             engine_prompt["additional_information"] = additional_information
         return additional_information
-
-    @staticmethod
-    def _resolve_chat_speaker(request: ChatLikeRequest | ResponsesRequest) -> Any:
-        """Resolve root speaker fields before the nested chat-audio voice."""
-        speaker = getattr(request, "voice", None) or getattr(request, "speaker", None)
-        if speaker is not None:
-            return speaker
-
-        audio_params = getattr(request, "audio", None)
-        if isinstance(audio_params, Mapping):
-            return audio_params.get("voice")
-        return getattr(audio_params, "voice", None)
 
     def _needs_multistage_multimodal_split(self) -> bool:
         return bool(self._deferred_multimodal_modalities())
@@ -2860,7 +2848,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             audio_tensor=audio_tensor,
             sample_rate=sample_rate,
             response_format=audio_format,
-            speed=self._resolve_audio_speed(request),
+            speed=1.0,
             base64_encode=True,
         )
 
@@ -3841,7 +3829,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     audio_tensor=audio_array,
                     sample_rate=sample_rate,
                     response_format=audio_format,
-                    speed=self._resolve_audio_speed(request),
+                    speed=1.0,
                     base64_encode=True,
                 )
                 audio_response: AudioResponse = self.create_audio(audio_obj)
@@ -4070,13 +4058,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if audio_format == "pcm16":
             audio_format = "pcm"
         return audio_format
-
-    @staticmethod
-    def _resolve_audio_speed(request: ChatCompletionRequest) -> float:
-        """Read the optional speed extension from chat's nested audio params."""
-        audio_params = getattr(request, "audio", None)
-        speed = audio_params.get("speed") if isinstance(audio_params, Mapping) else getattr(audio_params, "speed", None)
-        return float(speed) if isinstance(speed, int | float) else 1.0
 
     def _create_error_response(
         self,

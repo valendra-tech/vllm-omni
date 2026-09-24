@@ -181,15 +181,14 @@ def _minimal_args(**overrides) -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("pipeline_config", "expected"),
     [
-        (SimpleNamespace(duplex_plugin="pkg.mod.Plugin", default_deploy_config_name=None), False),
+        (SimpleNamespace(duplex_plugin="pkg.mod.Plugin"), True),
         (SimpleNamespace(duplex_plugin=None), False),
         (SimpleNamespace(duplex_plugin=""), False),
         (SimpleNamespace(), False),
         (None, False),
     ],
 )
-def test_duplex_model_probe_follows_the_pipeline_plugin(monkeypatch, pipeline_config, expected: bool) -> None:
-    """A plugin is necessary but the effective deploy mode also selects duplex."""
+def test_duplex_serving_requires_a_pipeline_plugin(monkeypatch, tmp_path, pipeline_config, expected: bool) -> None:
     seen: dict[str, object] = {}
     deploy_path = tmp_path / "deploy.yaml"
     deploy_path.write_text("session_mode: duplex\n")
@@ -200,12 +199,12 @@ def test_duplex_model_probe_follows_the_pipeline_plugin(monkeypatch, pipeline_co
 
     monkeypatch.setattr(StageConfigFactory, "get_pipeline_config", fake_get_pipeline_config)
 
-    kwargs = {"trust_remote_code": True, "deploy_config": None}
-    assert api_server._is_duplex_model("demo-duplex-model", kwargs) is expected
+    kwargs = {"trust_remote_code": True, "deploy_config": str(deploy_path)}
+    assert api_server._should_serve_duplex("demo-duplex-model", kwargs) is expected
     assert seen == {
         "model": "demo-duplex-model",
         "trust_remote_code": True,
-        "deploy_config_path": None,
+        "deploy_config_path": str(deploy_path),
     }
 
 
@@ -312,24 +311,6 @@ def test_minicpmo_serving_profiles(monkeypatch, deploy_name, expected):
     assert api_server._should_serve_duplex("openbmb/MiniCPM-o-4_5", {}) is True
 
 
-def test_duplex_model_probe_uses_the_effective_deploy_session_mode(monkeypatch) -> None:
-    """Qwen's ordinary default stays turn-based; its duplex overlay selects the engine."""
-
-    pipeline = SimpleNamespace(
-        duplex_plugin="pkg.mod.Plugin",
-        default_deploy_config_name="qwen3_omni_moe.yaml",
-    )
-
-    def fake_get_pipeline_config(**_kwargs):
-        return pipeline
-
-    monkeypatch.setattr(StageConfigFactory, "get_pipeline_config", fake_get_pipeline_config)
-
-    assert api_server._is_duplex_model("demo-qwen-model", {}) is False
-    assert api_server._is_duplex_model("demo-qwen-model", {"deploy_config": "qwen3_omni_duplex.yaml"}) is True
-    assert api_server._is_duplex_model("demo-qwen-model", {"deploy_config": "qwen3_omni_moe.yaml"}) is False
-
-
 # --------------------------------------------------------------------------- #
 # app.state of a duplex-only server                                           #
 # --------------------------------------------------------------------------- #
@@ -363,19 +344,6 @@ async def test_duplex_app_state_wires_only_the_session_surfaces(monkeypatch) -> 
     assert state.openai_serving_chat is not None
     assert state.engine_client is engine
     assert state.vllm_config is engine._vllm_config
-
-
-@pytest.mark.asyncio
-async def test_api_shutdown_closes_the_duplex_handler() -> None:
-    calls: list[str] = []
-
-    class Handler:
-        async def close(self) -> None:
-            calls.append("closed")
-
-    await api_server._close_duplex_handler(SimpleNamespace(openai_serving_duplex=Handler()))
-
-    assert calls == ["closed"]
 
 
 # --------------------------------------------------------------------------- #

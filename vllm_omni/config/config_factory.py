@@ -369,21 +369,6 @@ class StageConfigFactory:
         return load_deploy_config(deploy_path)
 
     @classmethod
-    def get_deploy_config(
-        cls,
-        pipeline_config: PipelineConfig,
-        deploy_config_path: str | None = None,
-    ) -> DeployConfig:
-        """Resolve the effective deploy profile for a pipeline."""
-        user_deploy_config = cls._load_user_deploy_config(deploy_config_path)
-        if user_deploy_config is not None:
-            return user_deploy_config
-        default_name = pipeline_config.default_deploy_config_name
-        if default_name is not None:
-            return load_deploy_config(_DEPLOY_DIR / default_name)
-        return DeployConfig()
-
-    @classmethod
     def create_from_model(
         cls,
         model: str,

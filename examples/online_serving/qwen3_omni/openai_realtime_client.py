@@ -112,7 +112,7 @@ async def run_client(
     # The native duplex route does not use the Realtime compatibility query.
     url = _with_duplex_route(url)
     async with websockets.connect(url, max_size=64 * 1024 * 1024) as ws:
-        # 1) Open a duplex session.
+        # 1) Open a native duplex session.
         session_config: dict[str, object] = {
             "model": model,
             "modalities": ["text", "audio"],
@@ -121,17 +121,29 @@ async def run_client(
             "response_format": "pcm",
         }
         if server_vad:
-            session_config["turn_detection"] = {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-                "create_response": True,
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "model": model,
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 16_000},
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 500,
+                                "create_response": True,
+                                "interrupt_response": True,
+                            },
+                        }
+                    },
+                },
             }
         await ws.send(
             json.dumps(
                 {
-                    "type": "session.update",
+                    "type": "session.create",
                     "session": session_config,
                 }
             )
@@ -311,7 +323,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
-        help="Model name for session.update",
+        help="Model name for session.create",
     )
     parser.add_argument("--input-wav", required=True, type=Path, help="Input WAV (mono, PCM16, 16kHz)")
     parser.add_argument("--output-wav", default=Path("realtime_output.wav"), type=Path, help="Output WAV path")

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-
-"""Fail-closed compatibility data plane for Qwen3-Omni."""
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Realtime data-plane projection for the Qwen3-Omni duplex adapter."""
 
 from __future__ import annotations
 
@@ -9,15 +8,13 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from vllm_omni.engine.duplex.plugin import DuplexDataPlane
-
 EncodeAudio = Callable[[object, int, str, float | None], str | None]
 _MAX_RETAINED_TERMINAL_IDS = 1024
 
 
 @dataclass(frozen=True, slots=True)
 class Qwen3OmniDataPlaneContext:
-    """Context shape retained for the generic duplex plugin contract."""
+    """Serving state needed to project one Qwen3-Omni data-plane output."""
 
     epoch: int = 0
     turn_id: int = 0
@@ -29,8 +26,13 @@ class Qwen3OmniDataPlaneContext:
     modalities: tuple[str, ...] = ()
 
 
-class Qwen3OmniDataPlaneSession(DuplexDataPlane):
-    """Track request terminality while rejecting unsupported native projection."""
+class Qwen3OmniDataPlaneSession:
+    """Compatibility data plane required by the serving adapter protocol.
+
+    Qwen3 turn-based production output is projected by
+    ``ChatFallbackProjectorMixin``. This projector remains for the shared
+    adapter contract and must not be treated as the live Qwen3 output path.
+    """
 
     def __init__(self, encode_audio: EncodeAudio) -> None:
         self._encode_audio = encode_audio
@@ -38,11 +40,7 @@ class Qwen3OmniDataPlaneSession(DuplexDataPlane):
         self._terminal_order: deque[str] = deque()
 
     def begin_request(self, request_id: str) -> None:
-        self._terminal.discard(request_id)
-        try:
-            self._terminal_order.remove(request_id)
-        except ValueError:
-            pass
+        pass
 
     def is_terminal(self, request_id: str | None) -> bool:
         return request_id is None or request_id in self._terminal
@@ -59,13 +57,9 @@ class Qwen3OmniDataPlaneSession(DuplexDataPlane):
         self.mark_terminal(request_id)
 
     def close_session(self, session_id: str, *, active_request_id: str | None = None) -> None:
-        del session_id
         if active_request_id is not None:
             self.mark_terminal(active_request_id)
 
     def project(self, result: object, *, context: object | None = None) -> Iterable[dict[str, object]]:
         del result, context
-        raise RuntimeError("Qwen3-Omni uses the chat fallback; native data-plane projection is disabled")
-
-
-__all__ = ["Qwen3OmniDataPlaneContext", "Qwen3OmniDataPlaneSession"]
+        raise RuntimeError("Qwen3-Omni serving uses the chat fallback; native data-plane projection is disabled")
