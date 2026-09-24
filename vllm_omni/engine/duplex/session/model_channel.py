@@ -367,6 +367,53 @@ class ModelChannel:
         )
 
     # ------------------------------------------------------------------ #
+    # API-side fallback outputs                                           #
+    # ------------------------------------------------------------------ #
+
+    def begin_fallback_request(self, request_id: str) -> None:
+        """Mark an API-side fallback request active in the compatibility data plane."""
+        self._ctx.session.touch_lease(DuplexLeaseActivity.MODEL_OUTPUT)
+        self._ctx.plugin.data_plane.begin_request(request_id)
+
+    async def apply_fallback_output(
+        self,
+        output: Mapping[str, object],
+        *,
+        request_id: str,
+        expected_epoch: int,
+    ) -> tuple[str | None, bool]:
+        """Project one API-side model-neutral output through the normal response path."""
+        session = self._ctx.session
+        if session.epoch != expected_epoch or session.active_request_id != request_id:
+            return None, False
+        session.touch_lease(DuplexLeaseActivity.MODEL_OUTPUT)
+        model_result = dict(output)
+        # The API-side producer cannot change the engine-owned request identity.
+        model_result["data_plane_request_id"] = request_id
+        close_reason, emitted_response = await self._send_one_model_output_event(
+            model_result,
+            expected_epoch=expected_epoch,
+        )
+        terminal = isinstance(model_result.get("error_code"), str) or model_result.get("end_of_turn") is True
+        if terminal:
+            self._ctx.plugin.data_plane.close_stream(request_id)
+            session.clear_request(request_id)
+        return close_reason, terminal and emitted_response
+
+    def fail_fallback_response(self, *, request_id: str, error: str, error_code: str) -> None:
+        """Apply an API-side fallback failure using the native response error sequence."""
+        session = self._ctx.session
+        self._ctx.plugin.data_plane.close_stream(request_id)
+        session.clear_request(request_id)
+        self._fail_response_from_model_error(
+            {
+                "data_plane_request_id": request_id,
+                "error": error,
+                "error_code": error_code,
+            }
+        )
+
+    # ------------------------------------------------------------------ #
     # Stage outputs                                                      #
     # ------------------------------------------------------------------ #
 
@@ -793,69 +840,79 @@ class ModelChannel:
             }
             self._attach_runtime_metadata(speak_payload, model_result, stage_metrics=response_stage_metrics)
             self._out.emit(speak_payload)
-        previous_sent_ms = session.playback.sent_ms
-        text_chars_before_append = len("".join(session.assistant_text_buffer))
-        if isinstance(text, str):
-            session.append_assistant_text(text)
-        duration_ms = model_result.get("audio_duration_ms")
-        text_chars = len("".join(session.assistant_text_buffer))
-        mark_duration_ms = None
-        mark_text_chars: int | None = text_chars
-        if model_result.get("audio_text_mark") is False:
-            mark_text_chars = None
-        if isinstance(duration_ms, int | float):
-            mark_duration_ms = int(duration_ms)
-            if model_result.get("audio_duration_is_cumulative") is not True:
-                mark_duration_ms += session.playback.sent_ms
-        audio_text_marks = model_result.get("audio_text_marks")
-        audio_text_marks = self._normalize_audio_text_marks(
-            audio_text_marks if isinstance(audio_text_marks, list) else None,
-            audio_offset_ms=(
-                0
-                if model_result.get("audio_text_marks_are_cumulative") is True
-                or model_result.get("audio_duration_is_cumulative") is True
-                else previous_sent_ms
-            ),
-            text_offset_chars=(
-                0 if model_result.get("audio_text_marks_are_cumulative") is True else text_chars_before_append
-            ),
-        )
-        session.mark_audio_sent(
-            mark_duration_ms,
-            text_chars=mark_text_chars if mark_duration_ms is not None else None,
-            audio_text_marks=audio_text_marks,
-            text_requires_complete_audio=model_result.get("text_requires_complete_audio") is True,
-            audio_complete=model_result.get("audio_complete") is True,
-        )
-        payload = {
-            "type": "response.output_audio.delta",
-            "session_id": session.session_id,
-            "response_id": response_id,
-            "epoch": session.epoch,
-            "text": text if isinstance(text, str) else "",
-            "audio": audio if isinstance(audio, str) else "",
-            "format": (
-                model_result.get("audio_format")
-                if isinstance(model_result.get("audio_format"), str)
-                else session.response_config.response_format
-            ),
-            "end_of_turn": end_of_turn,
-            "model_speak": True,
-        }
-        if mark_duration_ms is not None:
-            payload["audio_duration_ms"] = mark_duration_ms
-        if audio_text_marks:
-            payload["audio_text_marks"] = audio_text_marks
-        elif mark_duration_ms is not None and mark_text_chars is not None:
-            payload["audio_text_marks"] = [
-                {"text_chars": max(0, int(mark_text_chars)), "audio_end_ms": max(0, int(mark_duration_ms))}
-            ]
-        payload["playback"] = session.playback.as_dict()
-        sample_rate_hz = model_result.get("sample_rate_hz") or model_result.get("audio_sample_rate_hz")
-        if isinstance(sample_rate_hz, int | float) and int(sample_rate_hz) > 0:
-            payload["sample_rate_hz"] = int(sample_rate_hz)
-        self._attach_runtime_metadata(payload, model_result, stage_metrics=response_stage_metrics)
-        self._out.emit(payload)
+        if has_text or has_audio:
+            previous_sent_ms = session.playback.sent_ms
+            text_chars_before_append = len("".join(session.assistant_text_buffer))
+            if isinstance(text, str):
+                session.append_assistant_text(text)
+            duration_ms = model_result.get("audio_duration_ms")
+            text_chars = len("".join(session.assistant_text_buffer))
+            mark_duration_ms = None
+            mark_text_chars: int | None = text_chars
+            if model_result.get("audio_text_mark") is False:
+                mark_text_chars = None
+            if isinstance(duration_ms, int | float):
+                mark_duration_ms = int(duration_ms)
+                if model_result.get("audio_duration_is_cumulative") is not True:
+                    mark_duration_ms += session.playback.sent_ms
+            audio_text_marks = model_result.get("audio_text_marks")
+            audio_text_marks = self._normalize_audio_text_marks(
+                audio_text_marks if isinstance(audio_text_marks, list) else None,
+                audio_offset_ms=(
+                    0
+                    if model_result.get("audio_text_marks_are_cumulative") is True
+                    or model_result.get("audio_duration_is_cumulative") is True
+                    else previous_sent_ms
+                ),
+                text_offset_chars=(
+                    0 if model_result.get("audio_text_marks_are_cumulative") is True else text_chars_before_append
+                ),
+            )
+            if has_audio:
+                session.mark_audio_sent(
+                    mark_duration_ms,
+                    text_chars=mark_text_chars if mark_duration_ms is not None else None,
+                    audio_text_marks=audio_text_marks,
+                )
+                payload: dict[str, object] = {
+                    "type": "response.output_audio.delta",
+                    "session_id": session.session_id,
+                    "response_id": response_id,
+                    "epoch": session.epoch,
+                    "text": text if isinstance(text, str) else "",
+                    "audio": audio,
+                    "format": (
+                        model_result.get("audio_format")
+                        if isinstance(model_result.get("audio_format"), str)
+                        else session.response_config.response_format
+                    ),
+                    "end_of_turn": end_of_turn,
+                    "model_speak": True,
+                    "playback": session.playback.as_dict(),
+                }
+                if mark_duration_ms is not None:
+                    payload["audio_duration_ms"] = mark_duration_ms
+                if audio_text_marks:
+                    payload["audio_text_marks"] = audio_text_marks
+                elif mark_duration_ms is not None and mark_text_chars is not None:
+                    payload["audio_text_marks"] = [
+                        {"text_chars": max(0, int(mark_text_chars)), "audio_end_ms": max(0, int(mark_duration_ms))}
+                    ]
+                sample_rate_hz = model_result.get("sample_rate_hz") or model_result.get("audio_sample_rate_hz")
+                if isinstance(sample_rate_hz, int | float) and int(sample_rate_hz) > 0:
+                    payload["sample_rate_hz"] = int(sample_rate_hz)
+            else:
+                payload = {
+                    "type": "response.text.delta",
+                    "session_id": session.session_id,
+                    "response_id": response_id,
+                    "epoch": session.epoch,
+                    "delta": text if isinstance(text, str) else "",
+                    "end_of_turn": end_of_turn,
+                    "model_speak": True,
+                }
+            self._attach_runtime_metadata(payload, model_result, stage_metrics=response_stage_metrics)
+            self._out.emit(payload)
         if (
             not end_of_turn
             and model_result.get("stage_role") == "tts"

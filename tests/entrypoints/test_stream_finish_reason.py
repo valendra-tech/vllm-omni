@@ -162,6 +162,7 @@ async def test_audio_stream_exposes_output_sample_rate():
     serving_chat = build_serving_chat()
     serving_chat._create_audio_choice = OmniOpenAIServingChat._create_audio_choice.__get__(serving_chat)
     request = make_request(modalities=["audio"])
+    request.audio = {"format": "pcm", "voice": "Vivian", "speed": 1.5}
     audio_tensor = MagicMock()
     audio_tensor.ndim = 1
     audio_tensor.numel.return_value = 16_000
@@ -203,6 +204,7 @@ async def test_audio_stream_exposes_output_sample_rate():
     assert audio_chunks
     assert audio_chunks[0]["sample_rate_hz"] == 16_000
     assert encoded_audio[0].sample_rate == 16_000
+    assert encoded_audio[0].speed == 1.5
 
 
 @pytest.mark.asyncio
