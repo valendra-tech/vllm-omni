@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import base64
+import io
 import struct
+import wave
+
+import pytest
 
 from vllm_omni.engine.duplex.fallback import FALLBACK_AUDIO_PAYLOAD_KEY, DuplexFallbackRequest
 from vllm_omni.entrypoints.duplex.chat_fallback import (
@@ -14,6 +18,8 @@ from vllm_omni.entrypoints.duplex.chat_fallback import (
     build_chat_request,
     project_chat_payload,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_build_chat_request_replaces_engine_audio_placeholder() -> None:
@@ -154,8 +160,9 @@ def test_build_chat_request_normalizes_frozen_tools_and_tool_choice() -> None:
 
     chat_request = build_chat_request(request, model="qwen")
 
-    assert chat_request.tools == [{"type": "function", "function": {"name": "lookup"}}]
-    assert chat_request.tool_choice == {"type": "function", "function": {"name": "lookup"}}
+    serialized = chat_request.model_dump(exclude_none=True)
+    assert serialized["tools"] == [{"type": "function", "function": {"name": "lookup"}}]
+    assert serialized["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
 
 
 def test_build_chat_request_keeps_each_history_audio_payload_distinct() -> None:
@@ -203,6 +210,92 @@ def test_build_chat_request_keeps_each_history_audio_payload_distinct() -> None:
     assert chat_request.messages[-1]["content"] == "text follow-up"
 
 
+def test_audio_history_byte_budget_prunes_complete_turns_without_mutating_the_snapshot() -> None:
+    payload = {
+        "audio": base64.b64encode(b"\0" * (4 * 1024 * 1024)).decode(),
+        "format": "pcm_f32le",
+        "sample_rate_hz": 16_000,
+    }
+    audio_message = {
+        "role": "user",
+        "content": [{"type": "audio_url", "audio_url": {"url": "native-duplex:input-audio"}}],
+        FALLBACK_AUDIO_PAYLOAD_KEY: payload,
+    }
+    request = DuplexFallbackRequest(
+        session_id="sid",
+        request_id="request",
+        response_id="resp",
+        epoch=0,
+        history=(
+            {"role": "user", "content": "old question"},
+            audio_message,
+            {"role": "assistant", "content": "old answer"},
+            audio_message,
+            {"role": "user", "content": "new question"},
+        ),
+        response_config={"model": "qwen"},
+        input_payload=payload,
+        policy_messages=(),
+    )
+
+    chat = build_chat_request(request, model="qwen")
+
+    assert [message["role"] for message in chat.messages] == ["user", "user"]
+    assert chat.messages[-1]["content"] == "new question"
+    assert len(request.history) == 5
+    assert FALLBACK_AUDIO_PAYLOAD_KEY in request.history[1]
+
+
+def test_standalone_current_audio_reserves_a_slot_without_overwriting_historical_payloads() -> None:
+    def payload(value: float) -> dict[str, object]:
+        return {
+            "audio": base64.b64encode(struct.pack("<2f", value, value)).decode(),
+            "format": "pcm_f32le",
+            "sample_rate_hz": 16_000,
+        }
+
+    history: list[dict[str, object]] = []
+    for index in range(4):
+        history.extend(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "audio_url", "audio_url": {"url": "native-duplex:input-audio"}}],
+                    FALLBACK_AUDIO_PAYLOAD_KEY: payload((index + 1) / 8),
+                },
+                {"role": "assistant", "content": f"answer-{index}"},
+            ]
+        )
+    request = DuplexFallbackRequest(
+        session_id="sid",
+        request_id="request",
+        response_id="resp",
+        epoch=0,
+        history=history,
+        response_config={"model": "qwen"},
+        input_payload=payload(0.625),
+        policy_messages=(),
+    )
+
+    chat = build_chat_request(request, model="qwen")
+    audios = []
+    for message in chat.messages:
+        content = message.get("content")
+        for part in content if isinstance(content, list) else ():
+            if part.get("type") == "audio_url":
+                raw = base64.b64decode(part["audio_url"]["url"].split(",", 1)[1])
+                with wave.open(io.BytesIO(raw), "rb") as wav:
+                    audios.append(struct.unpack("<2h", wav.readframes(wav.getnframes())))
+
+    assert audios == [(8192, 8192), (12288, 12288), (16384, 16384), (20480, 20480)]
+    assert [message["content"] for message in chat.messages if message["role"] == "assistant"] == [
+        "answer-1",
+        "answer-2",
+        "answer-3",
+    ]
+    assert len(request.history) == 8
+
+
 def test_fallback_output_sample_rate_reads_realtime_session_payload() -> None:
     assert (
         _fallback_output_sample_rate(
@@ -225,6 +318,22 @@ def test_project_chat_payload_returns_model_neutral_text_output() -> None:
     )
 
     assert outputs == [{"text": "hello", "data_plane_request_id": "fallback-sid-0-1"}]
+
+
+def test_model_pcm_sample_rate_overrides_the_session_hint() -> None:
+    outputs = project_chat_payload(
+        {
+            "modality": "audio",
+            "sample_rate_hz": 16_000,
+            "choices": [{"delta": {"content": base64.b64encode(b"\0\0" * 8_000).decode()}}],
+        },
+        request_id="fallback-sid-0-1",
+        response_format="pcm16",
+        sample_rate_hz=24_000,
+    )
+
+    assert outputs[0]["sample_rate_hz"] == 16_000
+    assert outputs[0]["audio_duration_ms"] == 500
 
 
 def test_project_chat_payload_preserves_streamed_tool_call_fragments() -> None:

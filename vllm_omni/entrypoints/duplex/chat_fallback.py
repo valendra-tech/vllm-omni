@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import wave
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, overload
 
+import pybase64 as base64
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 from vllm_omni.engine.duplex.audio import pcm_f32le_payload_to_wav, wav_payload_to_pcm16
@@ -18,10 +18,20 @@ from vllm_omni.engine.duplex.fallback import FALLBACK_AUDIO_PAYLOAD_KEY, DuplexF
 
 _TOOL_CALL_FRAGMENT_KEY = "_duplex_tool_call_fragment"
 _TOOL_CALL_INDEX_KEY = "_duplex_tool_call_index"
+_MAX_PROMPT_AUDIO = 4
+_MAX_HISTORY_AUDIO_BYTES = 8 * 1024 * 1024
 
 
 class ChatFallbackStreamError(ValueError):
     """The API-side chat provider returned an invalid SSE record."""
+
+
+@overload
+def _copy_json(value: Mapping[str, object]) -> dict[str, object]: ...
+
+
+@overload
+def _copy_json(value: object) -> object: ...
 
 
 def _copy_json(value: object) -> object:
@@ -30,6 +40,20 @@ def _copy_json(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_copy_json(item) for item in value]
     return value
+
+
+@overload
+def _replace_audio_placeholder(value: Mapping[str, object], data_uri: str) -> tuple[dict[str, object], bool]: ...
+
+
+@overload
+def _replace_audio_placeholder(
+    value: list[dict[str, object]], data_uri: str
+) -> tuple[list[dict[str, object]], bool]: ...
+
+
+@overload
+def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bool]: ...
 
 
 def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bool]:
@@ -47,13 +71,13 @@ def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bo
                 replaced = True
         return result, replaced
     if isinstance(value, list | tuple):
-        result = []
+        result_list: list[object] = []
         replaced = False
         for item in value:
             copied, item_replaced = _replace_audio_placeholder(item, data_uri)
-            result.append(copied)
+            result_list.append(copied)
             replaced = replaced or item_replaced
-        return result, replaced
+        return result_list, replaced
     return value, False
 
 
@@ -121,6 +145,50 @@ def _restore_history_audio(messages: list[dict[str, object]]) -> list[dict[str, 
     return restored
 
 
+def _bound_audio_history(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Prune complete old turns from the model-input view, before WAV encoding."""
+    turns: list[list[dict[str, object]]] = []
+    for message in messages:
+        role = message.get("role")
+        if not turns or role == "system" or (role == "user" and turns[-1][-1].get("role") != "user"):
+            turns.append([])
+        turns[-1].append(message)
+
+    budgets: list[tuple[int, int]] = []
+    for turn in turns:
+        count = size = 0
+        for message in turn:
+            content = message.get("content")
+            payload = message.get(FALLBACK_AUDIO_PAYLOAD_KEY)
+            audio = payload.get("audio") if isinstance(payload, Mapping) else None
+            for part in content if isinstance(content, list) else ():
+                if not isinstance(part, Mapping) or part.get("type") != "audio_url":
+                    continue
+                count += 1
+                audio_url = part.get("audio_url")
+                url = audio_url.get("url") if isinstance(audio_url, Mapping) else None
+                if isinstance(audio, str) and isinstance(url, str) and url.startswith("native-duplex:"):
+                    size += len(audio)
+                elif isinstance(url, str):
+                    size += len(url)
+        budgets.append((count, size))
+
+    audio_turns = [index for index, (count, _) in enumerate(budgets) if count]
+    count = sum(budget[0] for budget in budgets)
+    size = sum(budget[1] for budget in budgets)
+    dropped: set[int] = set()
+    while len(audio_turns) > 1 and (count > _MAX_PROMPT_AUDIO or size > _MAX_HISTORY_AUDIO_BYTES):
+        oldest = audio_turns.pop(0)
+        dropped.add(oldest)
+        count -= budgets[oldest][0]
+        size -= budgets[oldest][1]
+    if count > _MAX_PROMPT_AUDIO:
+        raise ValueError("fallback user turn exceeds the four-audio prompt limit")
+    # As with native Qwen history, always retain the newest audio-bearing turn
+    # even when its own payload exceeds the encoded-history byte budget.
+    return [message for index, turn in enumerate(turns) if index not in dropped for message in turn]
+
+
 def _fallback_output_sample_rate(response_config: Mapping[str, object]) -> int | None:
     def positive_rate(value: object) -> int | None:
         if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
@@ -151,8 +219,9 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
     response_config = request.response_config
     history = [dict(_copy_json(message)) for message in request.history]
     input_payload = request.input_payload
-    input_is_in_history = input_payload is not None and any(
-        message.get(FALLBACK_AUDIO_PAYLOAD_KEY) == input_payload for message in history
+    input_is_in_history = request.input_in_history or (
+        input_payload is not None
+        and any(message.get(FALLBACK_AUDIO_PAYLOAD_KEY) == input_payload for message in history)
     )
     messages: list[dict[str, object]] = [dict(_copy_json(message)) for message in request.policy_messages]
     instructions = response_config.get("instructions")
@@ -164,11 +233,14 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
             initial_user_text=response_config.get("initial_user_text"),
         )
     )
-    messages = _restore_history_audio(messages)
-
     if input_payload is not None and not input_is_in_history:
         data_uri = _audio_data_uri(input_payload)
-        messages, replaced = _replace_audio_placeholder(messages, data_uri)
+        replaced = False
+        for index, message in enumerate(messages):
+            if FALLBACK_AUDIO_PAYLOAD_KEY in message:
+                continue
+            messages[index], item_replaced = _replace_audio_placeholder(message, data_uri)
+            replaced = replaced or item_replaced
         if not replaced:
             messages.append(
                 {
@@ -176,6 +248,8 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
                     "content": [{"type": "audio_url", "audio_url": {"url": data_uri}}],
                 }
             )
+
+    messages = _restore_history_audio(_bound_audio_history(messages))
 
     kwargs: dict[str, Any] = {
         "model": response_config.get("model") if isinstance(response_config.get("model"), str) else model,
@@ -353,28 +427,30 @@ def project_chat_payload(
             continue
         if output_modality == "audio":
             output_fmt = _audio_format(response_format)
-            hinted_rate = sample_rate_hz
-            for source in (choice, payload, payload.get("metrics")):
-                if not isinstance(source, Mapping):
+            hinted_rate = None
+            for rate_source in (choice, payload, payload.get("metrics")):
+                if not isinstance(rate_source, Mapping):
                     continue
                 for key in ("sample_rate_hz", "audio_sample_rate", "sample_rate", "sr"):
-                    value = source.get(key)
+                    value = rate_source.get(key)
                     if isinstance(value, int | float) and int(value) > 0:
                         hinted_rate = int(value)
                         break
                 if hinted_rate is not None:
                     break
+            if hinted_rate is None:
+                hinted_rate = sample_rate_hz
             duration_ms, output_rate = _audio_metadata(content, fmt=output_fmt, sample_rate_hz=hinted_rate)
-            result: dict[str, object] = {
+            audio_result: dict[str, object] = {
                 "audio": content,
                 "audio_format": output_fmt,
                 "data_plane_request_id": request_id,
             }
             if output_rate is not None:
-                result["sample_rate_hz"] = output_rate
+                audio_result["sample_rate_hz"] = output_rate
             if duration_ms > 0:
-                result["audio_duration_ms"] = duration_ms
-            results.append(result)
+                audio_result["audio_duration_ms"] = duration_ms
+            results.append(audio_result)
         else:
             results.append({"text": content, "data_plane_request_id": request_id})
     return results

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 
@@ -144,10 +145,10 @@ class TurnDetectionConfig:
     @classmethod
     def from_realtime(cls, turn_detection: Mapping[str, object]) -> TurnDetectionConfig:
         return cls(
-            threshold=float(turn_detection.get("threshold", 0.5)),
-            prefix_padding_ms=int(turn_detection.get("prefix_padding_ms", 300)),
-            silence_duration_ms=int(turn_detection.get("silence_duration_ms", 500)),
-            min_speech_duration_ms=int(turn_detection.get("min_speech_duration_ms", 96)),
+            threshold=float(cast("int | float", turn_detection.get("threshold", 0.5))),
+            prefix_padding_ms=int(cast("int | float", turn_detection.get("prefix_padding_ms", 300))),
+            silence_duration_ms=int(cast("int | float", turn_detection.get("silence_duration_ms", 500))),
+            min_speech_duration_ms=int(cast("int | float", turn_detection.get("min_speech_duration_ms", 96))),
             create_response=bool(turn_detection.get("create_response", True)),
             interrupt_response=bool(turn_detection.get("interrupt_response", True)),
         )

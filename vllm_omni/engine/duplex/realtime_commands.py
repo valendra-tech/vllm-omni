@@ -78,7 +78,6 @@ from vllm_omni.protocol.duplex import (
     validate_realtime_response_audio_formats,
     validate_realtime_session_audio_formats,
     validate_realtime_video_frames,
-    validate_session_payload,
 )
 
 

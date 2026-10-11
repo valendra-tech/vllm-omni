@@ -53,36 +53,12 @@ vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
   --deploy-config /path/to/your_qwen3_omni_overrides.yaml
 ```
 
-### Turn-Based Duplex
-
-Use the bundled duplex overlay to expose the turn-based WebSocket endpoint:
-
-```bash
-vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
-  --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml
-```
-
-Connect clients to `ws://<host>:8091/v1/duplex`. Send
-`input_audio_buffer.append` events followed by `input_audio_buffer.commit`, or
-send `input.text.append` followed by `input.commit`. Qwen3-Omni returns text
-deltas and `response.output_audio.delta` events through the chat fallback path.
-The Qwen3 adapter starts a response after a committed turn; clients do not
-need to repeat the server-side `session_mode` in `extra_body`.
-
-Qwen3 duplex is turn-based rather than model-native: it does not use the
-MiniCPM/PersonaPlex engine control plane or native listen/speak tokens. To
-interrupt an active response, send `input.cancel` (or use the client-side VAD
-policy) before committing the next turn.
-
-The Qwen3 serving adapter is selected by the registered Qwen3 pipeline and
-must not be copied into another model pipeline.
-
-#### Runtime tuning
+### Runtime tuning
 
 Prefer CLI overrides for day-to-day tuning:
 
 ```bash
-# Disable async chunking for turn-based duplex
+# Disable async chunking when using /v1/realtime
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
   --no-async-chunk
 
@@ -97,9 +73,21 @@ vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
     "1": {"max_num_seqs": 4},
     "2": {"max_num_seqs": 4}
   }'
+
+# Replay the thinker's image encoder from CUDA graphs (images only)
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
+  --stage-overrides '{"0": {"compilation_config": {"cudagraph_mm_encoder": true}}}'
 ```
 
-#### Stage-based launch (one stage per process)
+With the encoder graphs on, the thinker captures one graph per token budget
+(64 to 256 image tokens and up to 4 images per replay by default). A step's
+images replay together when one captured graph holds them all; otherwise they
+run through the eager encoder in one call. Set `encoder_cudagraph_token_budgets`
+and `encoder_cudagraph_max_vision_items_per_batch` in the same
+`compilation_config` to change them; each captured budget adds graph memory on
+the thinker's GPU.
+
+### Stage-based launch (one stage per process)
 
 Use three terminals (one per stage). Start with the default commands below, then
 add `--max-num-seqs` only if you need explicit per-stage concurrency control.
@@ -159,7 +147,7 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni \
 
 If you use custom deploy YAML, add `--deploy-config` to each stage command.
 
-#### Verification
+### Verification
 
 After server startup, run a multimodal example client:
 
@@ -199,26 +187,33 @@ curl http://localhost:8091/v1/chat/completions \
   }'
 ```
 
-Turn-based duplex smoke test (`/v1/duplex`, raw websocket path): use the
-bundled duplex overlay, which sets `session_mode: duplex` and disables async
-chunking:
+For turn-based duplex through chat completions, restart the server with the
+dedicated fallback profile. It disables async chunking and admits one session:
 
 ```bash
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
-  --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml
+  --deploy-config vllm_omni/deploy/qwen3_omni_chat_fallback.yaml
 ```
 
-Then run the raw websocket client against the native duplex endpoint:
+Then exercise input, output and interruption with the model-neutral client:
 
 ```bash
-python examples/online_serving/qwen3_omni/openai_realtime_client.py \
+python examples/online_serving/barge_in_client.py --preset none \
   --url ws://localhost:8091/v1/duplex \
   --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
-  --input-wav /path/to/input_16k_mono.wav \
-  --output-wav realtime_output.wav
+  --question-wav /path/to/input_16k_mono.wav \
+  --interrupt-wav /path/to/follow_up_16k_mono.wav \
+  --output-dir ./duplex_out
 ```
 
-#### Benchmark with `vllm bench`
+The fallback reports `implementation_level: chat_fallback`. Audio commits
+create a response by default; `response_create: false` defers it until
+`response.create`. Images and reference voices are not supported in this
+profile. `qwen3_omni_duplex.yaml` retains the engine-managed Qwen path. See the
+[Realtime Duplex API](../../docs/serving/realtime_duplex_api.md#qwen3-omni-chat-fallback)
+for session controls and capability details.
+
+### Benchmark with `vllm bench`
 
 After the server is up, you can run online serving benchmarks with
 `vllm bench serve --omni`.
@@ -273,8 +268,54 @@ vllm bench serve \
   --percentile-metrics ttft,tpot,itl,e2el
 ```
 
-#### Notes
+### Notes
 
-- The turn-based duplex deployment is unsupported while `async_chunk` is enabled.
+- The chat-fallback profile requires `async_chunk: false`.
 - The default deploy uses `SharedMemoryConnector`; this is for single-host
   stage wiring.
+
+## XPU
+
+### 5x Intel Arc Pro B70 (32 GB)
+
+Offline end-to-end text query returning both text and speech. The 62 GiB of
+BF16 thinker weights need four cards, so the `xpu:` block of
+`vllm_omni/deploy/qwen3_omni_moe.yaml` runs the thinker at TP=4 on cards 0-3
+and the talker and code2wav on card 4. It is the registry default here, so
+`--deploy-config` is not needed.
+
+#### Environment
+
+- OS: Linux
+- Python: 3.10+
+- torch: 2.13.0+xpu
+- vLLM: 0.29.0 (`98dff2a8`)
+- vLLM-Omni: `main` at `4c7a98c2`
+
+#### Command
+
+The raised timeouts absorb the first decode step, which JIT-compiles the
+Triton MoE kernels.
+
+```bash
+VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 \
+python examples/offline_inference/qwen3_omni/end2end.py \
+  --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --query-type text \
+  --stage-init-timeout 1800 \
+  --init-timeout 1800 \
+  --output-wav qwen3omni_output
+```
+
+#### Verification
+
+`qwen3omni_output/` holds one `.txt` answer and the matching `.wav`. Confirm
+the transcript of the audio tracks the text response.
+
+#### Notes
+
+- Runtime: about 260 s for a single text query.
+- The thinker MoE layers have no tuned Triton config for this shape and log
+  `Using default MoE config. Performance might be sub-optimal!`.
+- Known limitations: only `--query-type text` was qualified. The audio, image,
+  and video query types and online serving are out of scope for this profile.

@@ -5,17 +5,20 @@
 
 from __future__ import annotations
 
-import base64
 import struct
 
+import pybase64 as base64
 import pytest
 
 from vllm_omni.engine.duplex.config import DuplexSessionConfig
 from vllm_omni.engine.duplex.plugin import load_duplex_plugin
-from vllm_omni.model_executor.models.qwen3_omni.duplex.plugin import (
-    Qwen3OmniDuplexPlugin,
+from vllm_omni.model_executor.models.qwen3_omni.duplex.chat_fallback_plugin import (
+    Qwen3OmniChatFallbackPlugin,
 )
-from vllm_omni.model_executor.models.qwen3_omni.pipeline import QWEN3_OMNI_PIPELINE
+from vllm_omni.model_executor.models.qwen3_omni.pipeline import (
+    QWEN3_OMNI_CHAT_FALLBACK_PIPELINE,
+    QWEN3_OMNI_PIPELINE,
+)
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -31,7 +34,7 @@ def _pcm(*samples: float) -> str:
 
 def test_qwen3_plugin_loads_through_the_unified_contract() -> None:
     plugin = load_duplex_plugin(
-        "vllm_omni.model_executor.models.qwen3_omni.duplex.plugin.Qwen3OmniDuplexPlugin",
+        "vllm_omni.model_executor.models.qwen3_omni.duplex.chat_fallback_plugin.Qwen3OmniChatFallbackPlugin",
         _encode_audio,
     )
 
@@ -44,7 +47,7 @@ def test_qwen3_plugin_loads_through_the_unified_contract() -> None:
 
 
 def test_qwen3_fallback_policy_adds_interruption_note_until_request_starts() -> None:
-    plugin = Qwen3OmniDuplexPlugin(_encode_audio)
+    plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
     state = plugin.create_session_state()
     state.last_turn_interrupted = True
 
@@ -58,7 +61,7 @@ def test_qwen3_fallback_policy_adds_interruption_note_until_request_starts() -> 
 
 
 def test_qwen3_barge_in_marks_the_next_fallback_as_interrupted() -> None:
-    plugin = Qwen3OmniDuplexPlugin(_encode_audio)
+    plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
     state = plugin.create_session_state()
 
     plugin.on_barge_in(state)
@@ -67,14 +70,14 @@ def test_qwen3_barge_in_marks_the_next_fallback_as_interrupted() -> None:
 
 
 def test_qwen3_native_data_plane_fails_closed() -> None:
-    plugin = Qwen3OmniDuplexPlugin(_encode_audio)
+    plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
 
     with pytest.raises(RuntimeError, match="chat fallback"):
         list(plugin.data_plane.project({}, context=None))
 
 
 def test_qwen3_buffer_returns_one_committed_pcm_turn_and_clears() -> None:
-    plugin = Qwen3OmniDuplexPlugin(_encode_audio)
+    plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
     buffer = plugin.create_session_state().audio_buffer
     payload = {
         "type": "audio",
@@ -115,8 +118,40 @@ def test_qwen3_pipeline_uses_the_unified_plugin_binding() -> None:
     )
 
 
+def test_qwen3_chat_fallback_is_an_explicit_pipeline_variant() -> None:
+    assert QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.duplex_plugin == (
+        "vllm_omni.model_executor.models.qwen3_omni.duplex.chat_fallback_plugin.Qwen3OmniChatFallbackPlugin"
+    )
+    assert QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.stages == QWEN3_OMNI_PIPELINE.stages
+    assert QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.default_session_mode == "duplex"
+
+
+def test_qwen3_chat_fallback_deploy_disables_chunking_and_limits_admission() -> None:
+    from vllm_omni.config.stage_config import _DEPLOY_DIR, load_deploy_config
+
+    deploy = load_deploy_config(_DEPLOY_DIR / "qwen3_omni_chat_fallback.yaml")
+
+    assert deploy.pipeline == QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.model_type
+    assert deploy.session_mode == "duplex"
+    assert deploy.async_chunk is False
+    assert deploy.duplex_session.max_sessions == 1
+    assert len(deploy.stages) == 3
+
+
+def test_qwen3_streaming_overlay_keeps_fallback_pipeline_and_admission() -> None:
+    from vllm_omni.config.stage_config import _DEPLOY_DIR, load_deploy_config
+
+    deploy = load_deploy_config(_DEPLOY_DIR / "qwen3_omni_chat_fallback_streaming.yaml")
+
+    assert deploy.pipeline == QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.model_type
+    assert deploy.session_mode == "duplex"
+    assert deploy.async_chunk is True
+    assert deploy.duplex_session.max_sessions == 1
+    assert len(deploy.stages) == 3
+
+
 def test_qwen3_plugin_preserves_session_config_shape() -> None:
-    plugin = Qwen3OmniDuplexPlugin(_encode_audio)
+    plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
 
     plugin.validate_client_extra_body({})
     assert (
