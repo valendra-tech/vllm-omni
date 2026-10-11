@@ -138,6 +138,18 @@ def test_qwen3_chat_fallback_deploy_disables_chunking_and_limits_admission() -> 
     assert len(deploy.stages) == 3
 
 
+def test_qwen3_streaming_overlay_keeps_fallback_pipeline_and_admission() -> None:
+    from vllm_omni.config.stage_config import _DEPLOY_DIR, load_deploy_config
+
+    deploy = load_deploy_config(_DEPLOY_DIR / "qwen3_omni_chat_fallback_streaming.yaml")
+
+    assert deploy.pipeline == QWEN3_OMNI_CHAT_FALLBACK_PIPELINE.model_type
+    assert deploy.session_mode == "duplex"
+    assert deploy.async_chunk is True
+    assert deploy.duplex_session.max_sessions == 1
+    assert len(deploy.stages) == 3
+
+
 def test_qwen3_plugin_preserves_session_config_shape() -> None:
     plugin = Qwen3OmniChatFallbackPlugin(_encode_audio)
 

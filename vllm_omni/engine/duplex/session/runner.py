@@ -1023,7 +1023,14 @@ class DuplexSessionRunner:
             action = decision.get("action")
             if action == "drop":
                 duration_ms = overlap_policy.input_audio_duration_ms(event, payload)
-                self._emit_events(discard_pending_input_audio(projector, duration_ms))
+                # Drop this packet, not the earlier fallback speech still
+                # waiting for commit. Native overlap keeps its existing reset.
+                if not (
+                    self._supports_chat_fallback()
+                    and model_state.speech_since_commit
+                    and model_state.audio_buffer.has_pending()
+                ):
+                    self._emit_events(discard_pending_input_audio(projector, duration_ms))
                 self._maybe_schedule_vad_commit(vad_result)
                 return
             if action == "listen":
