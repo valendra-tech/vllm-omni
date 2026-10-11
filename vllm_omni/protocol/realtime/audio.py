@@ -3,18 +3,28 @@
 
 from __future__ import annotations
 
-import base64
 import binascii
 import io
 import math
 import wave
+from collections.abc import Callable
 
 import numpy as np
+import pybase64 as base64
 
 from vllm_omni.utils.audio_resample import StreamingAudioResampler
 
+alaw2lin: Callable[[bytes, int], bytes] | None
+lin2alaw: Callable[[bytes, int], bytes] | None
+lin2ulaw: Callable[[bytes, int], bytes] | None
+ulaw2lin: Callable[[bytes, int], bytes] | None
 try:
-    from audioop import alaw2lin, lin2alaw, lin2ulaw, ulaw2lin
+    from audioop import alaw2lin as _alaw2lin
+    from audioop import lin2alaw as _lin2alaw
+    from audioop import lin2ulaw as _lin2ulaw
+    from audioop import ulaw2lin as _ulaw2lin
+
+    alaw2lin, lin2alaw, lin2ulaw, ulaw2lin = _alaw2lin, _lin2alaw, _lin2ulaw, _ulaw2lin
 except ImportError:  # pragma: no cover - audioop is removed in newer Python.
     alaw2lin = lin2alaw = lin2ulaw = ulaw2lin = None
 
@@ -147,6 +157,21 @@ def encode_float32_mono_wav_base64(
             wav_file.setframerate(rate)
             wav_file.writeframes(pcm16.tobytes())
         return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def pcm_f32le_payload_to_wav(audio: str, sample_rate_hz: int | float) -> tuple[str, str, int]:
+    """Validate raw mono float PCM and wrap it with the shared WAV encoder."""
+    rate = validate_input_sample_rate_hz(sample_rate_hz)
+    try:
+        raw = base64.b64decode(audio.strip(), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("audio payload is not valid base64") from exc
+    if not raw or len(raw) % 4:
+        raise ValueError("pcm_f32le audio payload must contain complete samples")
+    samples = np.frombuffer(raw, dtype="<f4")
+    if not np.isfinite(samples).all():
+        raise ValueError("pcm_f32le audio payload contains non-finite samples")
+    return encode_float32_mono_wav_base64(samples, sample_rate_hz=rate), "wav", rate
 
 
 def convert_input_audio_with_rate(

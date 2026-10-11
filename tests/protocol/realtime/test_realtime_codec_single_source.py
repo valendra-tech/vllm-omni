@@ -62,7 +62,13 @@ def test_the_duplex_codec_name_is_the_protocol_object(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ("convert_input_audio_with_rate", "convert_output_audio", "resample_pcm16_mono", "wav_payload_to_pcm16"),
+    (
+        "convert_input_audio_with_rate",
+        "convert_output_audio",
+        "pcm_f32le_payload_to_wav",
+        "resample_pcm16_mono",
+        "wav_payload_to_pcm16",
+    ),
 )
 def test_the_duplex_audio_shim_is_the_protocol_object(name: str) -> None:
     assert getattr(duplex_audio, name) is getattr(protocol, name)
