@@ -17,8 +17,10 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_fallback_request_snapshots_nested_identity_and_history() -> None:
-    history = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
-    response_config = {"model": "qwen", "modalities": ["audio"]}
+    content = [{"type": "text", "text": "hello"}]
+    history = [{"role": "user", "content": content}]
+    modalities = ["audio"]
+    response_config = {"model": "qwen", "modalities": modalities}
     input_payload = {"format": "pcm_f32le", "audio": "AAAA", "sample_rate_hz": 16_000}
     policy_messages = [{"role": "system", "content": "policy"}]
 
@@ -34,8 +36,8 @@ def test_fallback_request_snapshots_nested_identity_and_history() -> None:
     )
 
     history[0]["role"] = "assistant"
-    history[0]["content"][0]["text"] = "changed"
-    response_config["modalities"].append("text")
+    content[0]["text"] = "changed"
+    modalities.append("text")
     input_payload["audio"] = "changed"
     policy_messages[0]["content"] = "changed"
 
@@ -54,7 +56,7 @@ def test_chat_fallback_capability_is_false_by_default() -> None:
     capabilities = DuplexCapabilities()
 
     assert capabilities.supports_chat_fallback is False
-    assert capabilities.as_dict()["implementation_level"] == "model_native_duplex"
+    assert capabilities.as_dict()["implementation_level"] == "turn_based_duplex"
     assert capabilities.as_dict()["input_modes"] == ["append_audio_chunk"]
 
 
@@ -72,6 +74,7 @@ def test_capabilities_as_dict_exposes_chat_fallback_fields() -> None:
     assert serialized["supports_chat_completions"] is True
     assert serialized["supports_chat_fallback"] is True
     assert serialized["text_turn_priming_units"] == 0
+    assert serialized["implementation_level"] == "chat_fallback"
 
 
 def test_fallback_messages_are_engine_messages_not_realtime_events() -> None:

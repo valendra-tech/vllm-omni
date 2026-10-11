@@ -8,11 +8,38 @@ history stays honest, and a dropped connection can resume the same session.
 This page covers how to run a duplex deployment, how to drive it from Python
 with `vllm_omni.clients.duplex.DuplexClient`, and the complete wire contract.
 
-The endpoint is served for models that ship a duplex plugin — currently
-MiniCPM-o 4.5 and Qwen3-Omni — and just for deploy configurations that declare
-`session_mode: duplex`. PersonaPlex and Nemotron VoiceChat are ported to the
-plugin contract in follow-up PRs and are not served over this endpoint yet. The runtime architecture
-is described in [Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md).
+The endpoint requires a duplex plugin and a deployment with `session_mode: duplex`.
+See [supported models and deployments](full_duplex_api.md#enable-full-duplex)
+and the [runtime architecture](../design/fullduplex.md).
+
+## Qwen3-Omni conversation history
+
+Qwen3-Omni keeps incoming conversation items independently addressable by item
+ID. Before applying the model's chat template, it merges consecutive user
+items into one multimodal user message. An assistant message, including an
+empty message reserved for an interrupted or unheard answer, separates turns.
+The final user message places media before text instructions, following the
+[official Qwen3-Omni demo's `format_history()`](https://github.com/QwenLM/Qwen3-Omni/blob/e4235853125589c789f06a2dd83e9f4126df5e9d/web_demo.py#L84-L179).
+
+A camera image or text item may arrive after an audio commit and before
+`response.create`. Those items belong to the same pending user turn: the
+committed audio remains associated with its history item even when that item
+is no longer last. Prompt preparation snapshots the selected inputs; later
+items do not modify an already prepared request.
+
+The duplex adapter retains its existing budgets: at most four audio payloads
+(including the current input), an 8 MiB encoded-audio history budget (keeping
+at least the newest payload), and at most eight prompt images. The recent
+16-message window is rounded outwards to a complete turn. If any audio in an
+older turn is no longer retained, the entire turn's model context, including
+its images/text and assistant replies, is omitted. Images from that turn are
+therefore **not** permanent session-wide model context. These limits differ
+from the demo's one image-bearing turn and five audio-bearing turns; the
+shared rule is grouping before pruning, rather than copying its UI budgets.
+
+Grouping and pruning affect only the model-input view. They do not merge or
+delete the source conversation items exposed to clients, and do not change
+playback acknowledgement or interruption handling.
 
 ## Quick Start
 
@@ -27,7 +54,7 @@ vllm-omni serve openbmb/MiniCPM-o-4_5 \
 ```
 
 `vllm_omni/deploy/minicpmo_4_5.yaml` declares `session_mode: duplex` and
-`duplex_session.max_sessions: 4`. Because the MiniCPM-o 4.5 pipeline declares a
+`duplex_session.max_sessions: 16`. Because the MiniCPM-o 4.5 pipeline declares a
 `duplex_plugin`, `vllm-omni serve` runs it through `DuplexOmni`: the server
 mounts `ws://<host>:8099/v1/realtime?duplex=1` (this page; `ws://<host>:8099/v1/duplex`
 is an alias of the same route), `POST /v1/chat/completions`, `/v1/models` and
@@ -46,58 +73,42 @@ profile. This selects `AsyncOmni` and the ordinary API initialization instead
 of the duplex handler. See [Full Duplex](full_duplex_api.md#enable-full-duplex)
 for the command and configuration requirements.
 
-### Qwen3-Omni (turn-based chat fallback)
+### Qwen3-Omni chat fallback
 
-Qwen3-Omni has no model-native listen/speak tokens, so it uses the
-turn-based chat-fallback path instead of the native duplex control plane.
-User audio is committed into `DuplexSession.history` and served through the
-standard chat completions API with `modalities=["audio", "text"]`; the
-response is projected back into Realtime events.
+The opt-in fallback uses ordinary chat completions for each committed audio or
+text turn. Start it with:
 
 ```bash
-vllm-omni serve Qwen/Qwen3-Omni-30B-A3B-Instruct \
-    --omni \
-    --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml \
-    --trust-remote-code \
-    --host 0.0.0.0 --port 8099
+vllm-omni serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni \
+    --deploy-config vllm_omni/deploy/qwen3_omni_chat_fallback.yaml \
+    --host 0.0.0.0 --port 8091
 ```
 
-`vllm_omni/deploy/qwen3_omni_duplex.yaml` overlays `qwen3_omni_moe.yaml` with
-`session_mode: duplex`, `async_chunk: false`, and `max_sessions: 1`. The
-engine-resident Qwen3 plugin is selected automatically by the
-`qwen3_omni_moe` pipeline; no `--preset` or `ref_audio` is needed.
+Connect to `ws://localhost:8091/v1/duplex` or
+`ws://localhost:8091/v1/realtime?duplex=1`. This profile selects
+`qwen3_omni_moe_chat_fallback`, explicitly disables `async_chunk`, and limits
+admission to one session. Its capabilities report
+`implementation_level: chat_fallback`, `supports_chat_fallback: true`, and
+`supports_input_append: false`. It accepts streaming audio appends but starts
+inference only after a committed turn; it does not append to a native model
+request or use listen/speak tokens. Images, reference voices, and session resume
+are not supported by this profile.
 
-Connect with the model-neutral `SessionConfig` (no `native_duplex` flag):
+The engine's `DuplexEngineSession.history` is the conversation ledger. Private
+per-item audio payloads are restored as WAV `audio_url` parts when constructing
+the chat request. Float PCM is normalized to 16 kHz on input. Output playback
+duration accumulates across chunks using the model's reported sample rate.
 
-```python
-from pathlib import Path
+By default, `input_audio_buffer.commit` starts a response. Set
+`response_create: false` on a commit to defer it until `response.create`, or
+set `session.extra_body.auto_response: false` to disable automatic responses.
+Barge-in cancels the active fallback request and retains a one-shot interruption
+note until the next chat request is accepted. Text-only deltas use
+`response.text.delta`; audio uses `response.output_audio.delta`.
 
-from vllm_omni.clients.duplex import DuplexClient, SessionConfig, read_pcm16_wav
-
-config = SessionConfig(modalities=["audio", "text"])
-async with DuplexClient(
-    "ws://127.0.0.1:8099/v1/realtime",
-    model="Qwen/Qwen3-Omni-30B-A3B-Instruct",
-    config=config,
-) as client:
-    question = read_pcm16_wav(Path("question_16k.wav"))
-    await client.stream_pcm(question, chunk_ms=100)
-    await client.commit(create_response=True)  # auto-respond on commit (adapter default)
-    async for response in client.responses():
-        async for chunk in response.audio():
-            ...  # PCM16 bytes
-```
-
-`DuplexClient` uses the Realtime compatibility route shown above. The raw
-`/v1/duplex` alias uses the same protocol and the raw WebSocket example sends
-`session.update` before streaming audio.
-
-Input WAVs must be mono 16 kHz PCM16. Barge-in is supported: sending
-`input.cancel` or new audio while a response is active marks the turn as
-interrupted and injects an interruption note into the next turn's system
-prompt. The `auto_respond_on_commit` hook defaults to `True` for Qwen3-Omni,
-so `commit()` without `create_response=False` starts a response
-automatically.
+`qwen3_omni_duplex.yaml` continues to select the engine-managed Qwen plugin,
+including its image input and history grouping described above. The fallback
+plugin is specific to its dedicated Qwen3 pipeline.
 
 ### Run the Example Client
 
@@ -173,8 +184,8 @@ re-attaching from a new client or process requires the wire-level
 from vllm_omni.clients.duplex import read_pcm16_wav
 
 question = read_pcm16_wav(Path("question_16k.wav"))
-await client.stream_pcm(question, chunk_ms=100)  # paced 100 ms appends
-await client.commit(create_response=False)  # the model decides listen/speak
+await client.stream_pcm(question, chunk_ms=100)      # paced 100 ms appends
+await client.commit(create_response=False)           # the model decides listen/speak
 ```
 
 `stream_pcm` slices PCM into `chunk_ms` appends and paces them in real time
@@ -204,8 +215,8 @@ handle with `decision == "listen"`.
 ```python
 async for response in client.responses():
     if response.decision == "listen":
-        continue  # the model kept listening
-    async for chunk in response.audio():  # decoded PCM16 at 24 kHz
+        continue                                   # the model kept listening
+    async for chunk in response.audio():           # decoded PCM16 at 24 kHz
         play(chunk)
         await client.ack_playback(response.played_ms, response_id=response.response_id)
     await response.wait()
@@ -228,8 +239,8 @@ what the example and the benchmarks do at the end of a turn.
 ### Interrupt
 
 ```python
-await client.cancel_response()  # cancel the active response (epoch advances)
-await client.clear_input()  # drop un-committed input audio
+await client.cancel_response()        # cancel the active response (epoch advances)
+await client.clear_input()            # drop un-committed input audio
 ```
 
 In the model-native lane you usually do not need either: keep streaming
@@ -275,6 +286,40 @@ Server `error` events are delivered as `ErrorEvent` (with `code`, `message`,
 call; transport failures raise `DuplexConnectionError`; a session that ends
 while you are awaiting it raises `DuplexSessionClosedError`. All three derive
 from `DuplexClientError`.
+
+### Output limits and slow consumers
+
+Deployment settings under `duplex_session` bound each session's pending
+output: `max_pending_output_bytes_per_session` defaults to 2 MiB and
+`max_pending_output_events_per_session` to 512 events. Bytes count compact
+Realtime JSON, including base64 audio, not decoded audio. The limits apply
+to both WebSocket delivery and direct Python handles, not to replay journals
+or client playback queues.
+
+Exceeding a limit fails the active response without committing its partial
+text to history, then closes only that session. If overflow occurs while a
+completion is being queued, its not-yet-queued `response.done` becomes failed
+with the same identity and output, and its response history entry is removed.
+An ending already accepted by the buffer is not replaced or followed by a
+second ending. Open a new session to continue; the closed session cannot be
+resumed. The notifications use these fields:
+
+| Event | Field values |
+| --- | --- |
+| `error` | `error.type: "rate_limit_error"`, `error.code: "output_backpressure"` |
+| `response.done` (active response or not-yet-queued ending) | `response.status: "failed"`, `response.status_details: {"type": "failed", "reason": "output_backpressure"}` |
+| `session.closed` | `reason: "output_backpressure"` |
+
+Queued audio for the affected response is removed. Previously queued non-audio
+events retain their order, but newly emitted ordinary events, including
+audio/text, content-part and output-item completion markers, are suppressed.
+Clients must therefore handle closure without waiting for every completion
+marker. Errors and response endings have an extra 64 KiB / eight-event reserve;
+if that also fills, either notification may be omitted. Closure has its own
+independent slot. A closure notification exceeding 4 KiB is compacted to
+`reason: "close_details_exceed_output_limit"` with empty details, preserving
+the event type and identity. One event held by the consumer is outside the
+queued budget; audio already sent still requires the client to stop playback.
 
 ### Measure latency
 
@@ -341,6 +386,8 @@ single-consumer async iterator that ends after `session.closed` /
 `session.expired`; rejected commands come back as `ErrorEvent`s on it.
 Every event renders the wire JSON with `to_realtime()`, so anything written
 against the WebSocket protocol works unchanged on the typed stream.
+If opening fails, the abandoned handle is closed. Late engine events do not
+reopen a locally closed handle.
 
 `vllm_omni.clients.inline_duplex.InlineDuplexClient` wraps a `DuplexOmni`
 behind the `DuplexClient` API, so the same application code runs in-process
@@ -410,24 +457,28 @@ with no OpenAI counterpart.
 
 The event vocabulary is uniform, but several surfaces are gated by the
 `capabilities` object the server returns in `session.created`; a client must
-branch on those flags rather than on the model name. MiniCPM-o 4.5 uses the
-model-native lane, while Qwen3-Omni uses the turn-based chat-fallback lane.
-PersonaPlex and Nemotron VoiceChat are not served over this endpoint yet:
+branch on those flags rather than on the model name. MiniCPM-o 4.5 and
+PersonaPlex are on the plugin contract today; the Nemotron VoiceChat column
+records what its integration advertises once the follow-up PR ports it:
 
-| Capability | MiniCPM-o 4.5 | Qwen3-Omni | PersonaPlex | Nemotron VoiceChat | Gated surface |
-| --- | --- | --- | --- | --- | --- |
-| `implementation_level` | `model_native_duplex` | `chat_fallback` | `model_native_duplex` | `model_native_duplex` | model- or engine-owned turn handling |
-| `chunk_period_ms` | 1000 | n/a (turn commit) | 80 | 80 | the model unit that native `response.listen` decisions and camera frames align to |
-| `supports_session_resume` | yes | no | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
-| `supports_barge_in` | yes | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, overlap handling |
-| `supports_audio_truncate` | yes | no | no | no | `conversation.item.truncate` and truncating `playback.ack` adjusting the stored assistant item |
-| video input (`video_frames` on append) | consumed by Stage 0 | not supported | ignored | ignored | omni camera track |
-| tool calls | no | yes (chat fallback) | no | yes | `response.function_call_arguments.*`, `function_call` items |
+| Capability | MiniCPM-o 4.5 | PersonaPlex | Nemotron VoiceChat | Gated surface |
+| --- | --- | --- | --- | --- |
+| `implementation_level` | `model_native_duplex` | `model_native_duplex` | `model_native_duplex` | model-owned `response.listen` / `response.speak` (constant: every duplex model is model-native) |
+| `chunk_period_ms` | 1000 | 80 | 80 | the model unit that `response.listen` decisions and camera frames align to |
+| `supports_session_resume` | yes | no | yes | `session.resume`, `session.resumed`, `session.replaced`, replay after a transport drop |
+| `supports_barge_in` | yes | no | no | `barge_in`, `turn.signal{event:"barge_in"}`, `overlap_policy=barge_in_on_speech`, `turn_detection.server_vad` |
+| `supports_audio_truncate` | yes | no | no | `conversation.item.truncate` and truncating `playback.ack` adjusting the stored assistant item |
+| video input (`video_frames` on append) | consumed by Stage 0 | ignored | ignored | omni camera track |
+| tool calls | no | no | yes | `response.function_call_arguments.*`, `function_call` items |
 
 Everything else in the catalogue — session lifecycle, heartbeat and event
 acknowledgement, append/commit/clear, the response envelope, playback
 acknowledgement, and the error envelope — behaves identically for every
-model.
+model. Two PersonaPlex specifics follow from its capabilities rather than from
+special-casing: a model with `supports_client_commit=false` auto-responds
+without `extra_body.auto_response`, and `response.cancel` /
+`output_audio_buffer.clear` restart its conversation context (a new Stage 0
+request replays the voice/persona prefill).
 
 ### Compatibility with the OpenAI Realtime protocol
 
@@ -473,12 +524,9 @@ Semantic divergences hidden behind shared names:
   before any commit; a commit may end in `response.listen` and no
   response, and the model may open a response with no commit at all.
   OpenAI: commit ⇒ item, `response.create` ⇒ exactly one response.
-- Native model sessions reject `turn_detection.interrupt_response=false` and
-  ignore `create_response`; Qwen3-Omni's chat-fallback session accepts
-  `interrupt_response=false` (the default) and maps it to
-  `overlap_policy=listen_only`. `semantic_vad` is unsupported; the VAD runs
-  per session (Silero), and native server-VAD otherwise implies
-  `overlap_policy=barge_in_on_speech`.
+- `turn_detection.interrupt_response=false` is rejected;
+  `create_response` is ignored; `semantic_vad` is unsupported; the VAD
+  runs per session (Silero) and implies `overlap_policy=barge_in_on_speech`.
 - `rate_limits.updated` is always an empty list (compatibility only).
 - Cancellation never reuses a `response_id`; truncation is driven by
   `playback.ack` as well as `conversation.item.truncate`.
@@ -598,7 +646,7 @@ formats (`pcm16`, `pcm_s16le`, `s16le`, `pcm_f32le`, `g711_ulaw`,
 | `session.created` | 2 | Session opened. OpenAI name; adds `attachment_generation`, `resume_token` and vLLM-Omni keys inside `session` (`id` is the server-allocated session id, `epoch`, `turn_id`, `playback`, `capabilities`, ...). |
 | `session.updated` | 2 | Echo of the effective session config after every `session.update` (same extended `session` object). |
 | `session.heartbeat_ack` | 3 | Reply to `session.heartbeat`. |
-| `session.closed` | 3 | Last event on the socket, emitted once the engine released the session; `reason` ∈ `client_close`, `disconnect`, `timeout`, `transport_error`, `shutdown`, ... |
+| `session.closed` | 3 | Last event on the socket, emitted once the engine released the session; `reason` ∈ `client_close`, `disconnect`, `timeout`, `transport_error`, `shutdown`, `output_backpressure`, `close_details_exceed_output_limit`, ... |
 | `session.resumed` | 3 | Resume accepted; carries the new `attachment_generation` and rotated `resume_token`; journaled events are replayed after it. |
 | `session.replaced` | 3 | Sent to the superseded socket when another socket resumes the session. |
 | `session.expired` | 3 | Engine lease reaped (`disconnect_grace_expired`, `idle_ttl_expired`); socket closes after it. |
@@ -1004,6 +1052,10 @@ deferred commit during an active response (`event.response_create_deferred`)
 {"type": "conversation.item.truncated", "item_id": "item_resp_01", "content_index": 0, "audio_end_ms": 1850, "event": {"…": "…"}}
 ```
 
+After this acknowledgement, `conversation.item.retrieve` returns the truncated
+transcript. Without text/audio alignment marks, its prefix is estimated from
+the requested position and audio duration; this is not exact word alignment.
+
 #### Response lifecycle
 
 `C→S response.create`
@@ -1363,29 +1415,22 @@ them out into typed events before they reach a client.
 
 ## Known Limitations
 
-- MiniCPM-o 4.5 and Qwen3-Omni are served over this endpoint today; PersonaPlex
-  and Nemotron VoiceChat arrive with the follow-up PRs that port them to the
-  plugin contract.
 - Several surfaces are capability-gated per model (see *Capability
   negotiation by model* above): PersonaPlex does not support session resume,
   barge-in, or audio truncation; Nemotron VoiceChat does not support barge-in
   or audio truncation; camera frames are consumed only by MiniCPM-o 4.5; tool
-  calls are produced by Qwen3-Omni's chat fallback and Nemotron VoiceChat.
-- In the native model lane, a response is generated from committed **audio**,
-  so the OpenAI text-prompt shape does not drive one:
-  `conversation.item.create` with an `input_text` part adds the item to
-  history, but a following `response.create` with no committed audio is
-  rejected with `response_create_without_input`, and `input.text.append` is
-  rejected with `native_text_append_unsupported`.
+  calls are produced only by Nemotron VoiceChat.
+- A response is generated from committed **audio**, so the OpenAI text-prompt
+  shape does not drive one: `conversation.item.create` with an `input_text`
+  part adds the item to history, but a following `response.create` with no
+  committed audio is rejected with `response_create_without_input`, and
+  `input.text.append` is rejected with `native_text_append_unsupported`.
   Text-to-speech has its own shape here — put the text in
   `extra_body.duplex_initial_user_text` on `session.update`, then stream audio
   units (silence is enough). The seeded turn is what the model answers.
-- Native model sessions support only `server_vad` with
-  `interrupt_response=true`; Qwen3-Omni's turn-based fallback also accepts
-  `interrupt_response=false` and honors `create_response` when Server VAD
-  commits a turn. `semantic_vad` remains unsupported, and
-  `turn_detection=null` disables Server VAD and leaves turn boundaries to the
-  model/client path.
+- `turn_detection` supports only `server_vad` with `interrupt_response=true`;
+  `semantic_vad`, `interrupt_response=false`, and `create_response` are not
+  supported.
 - `input_audio_transcription` and `input_audio_noise_reduction` are accepted
   and echoed but no separate transcription or noise-reduction stage runs;
   transcripts come from the model.
