@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Tests for audio normalization used by the turn-based duplex fallback."""
 
-import base64
 import io
 import wave
 
 import numpy as np
+import pybase64 as base64
 import pytest
 
-from vllm_omni.entrypoints.duplex.audio import (
+from vllm_omni.entrypoints.duplex.chat_fallback import _audio_metadata
+from vllm_omni.protocol.duplex import (
     encode_float32_mono_wav_base64,
     pcm_f32le_payload_to_wav,
 )
-from vllm_omni.entrypoints.duplex.chat_fallback import _audio_metadata
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

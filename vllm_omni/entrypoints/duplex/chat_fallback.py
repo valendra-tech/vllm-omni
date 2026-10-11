@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import wave
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, overload
 
+import pybase64 as base64
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 from vllm_omni.engine.duplex.audio import pcm_f32le_payload_to_wav, wav_payload_to_pcm16
@@ -24,12 +24,34 @@ class ChatFallbackStreamError(ValueError):
     """The API-side chat provider returned an invalid SSE record."""
 
 
+@overload
+def _copy_json(value: Mapping[str, object]) -> dict[str, object]: ...
+
+
+@overload
+def _copy_json(value: object) -> object: ...
+
+
 def _copy_json(value: object) -> object:
     if isinstance(value, Mapping):
         return {str(key): _copy_json(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_copy_json(item) for item in value]
     return value
+
+
+@overload
+def _replace_audio_placeholder(value: Mapping[str, object], data_uri: str) -> tuple[dict[str, object], bool]: ...
+
+
+@overload
+def _replace_audio_placeholder(
+    value: list[dict[str, object]], data_uri: str
+) -> tuple[list[dict[str, object]], bool]: ...
+
+
+@overload
+def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bool]: ...
 
 
 def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bool]:
@@ -47,13 +69,13 @@ def _replace_audio_placeholder(value: object, data_uri: str) -> tuple[object, bo
                 replaced = True
         return result, replaced
     if isinstance(value, list | tuple):
-        result = []
+        result_list: list[object] = []
         replaced = False
         for item in value:
             copied, item_replaced = _replace_audio_placeholder(item, data_uri)
-            result.append(copied)
+            result_list.append(copied)
             replaced = replaced or item_replaced
-        return result, replaced
+        return result_list, replaced
     return value, False
 
 
@@ -353,28 +375,30 @@ def project_chat_payload(
             continue
         if output_modality == "audio":
             output_fmt = _audio_format(response_format)
-            hinted_rate = sample_rate_hz
-            for source in (choice, payload, payload.get("metrics")):
-                if not isinstance(source, Mapping):
+            hinted_rate = None
+            for rate_source in (choice, payload, payload.get("metrics")):
+                if not isinstance(rate_source, Mapping):
                     continue
                 for key in ("sample_rate_hz", "audio_sample_rate", "sample_rate", "sr"):
-                    value = source.get(key)
+                    value = rate_source.get(key)
                     if isinstance(value, int | float) and int(value) > 0:
                         hinted_rate = int(value)
                         break
                 if hinted_rate is not None:
                     break
+            if hinted_rate is None:
+                hinted_rate = sample_rate_hz
             duration_ms, output_rate = _audio_metadata(content, fmt=output_fmt, sample_rate_hz=hinted_rate)
-            result: dict[str, object] = {
+            audio_result: dict[str, object] = {
                 "audio": content,
                 "audio_format": output_fmt,
                 "data_plane_request_id": request_id,
             }
             if output_rate is not None:
-                result["sample_rate_hz"] = output_rate
+                audio_result["sample_rate_hz"] = output_rate
             if duration_ms > 0:
-                result["audio_duration_ms"] = duration_ms
-            results.append(result)
+                audio_result["audio_duration_ms"] = duration_ms
+            results.append(audio_result)
         else:
             results.append({"text": content, "data_plane_request_id": request_id})
     return results

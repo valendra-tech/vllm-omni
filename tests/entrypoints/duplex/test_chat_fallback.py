@@ -8,12 +8,16 @@ from __future__ import annotations
 import base64
 import struct
 
+import pytest
+
 from vllm_omni.engine.duplex.fallback import FALLBACK_AUDIO_PAYLOAD_KEY, DuplexFallbackRequest
 from vllm_omni.entrypoints.duplex.chat_fallback import (
     _fallback_output_sample_rate,
     build_chat_request,
     project_chat_payload,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_build_chat_request_replaces_engine_audio_placeholder() -> None:
@@ -154,8 +158,9 @@ def test_build_chat_request_normalizes_frozen_tools_and_tool_choice() -> None:
 
     chat_request = build_chat_request(request, model="qwen")
 
-    assert chat_request.tools == [{"type": "function", "function": {"name": "lookup"}}]
-    assert chat_request.tool_choice == {"type": "function", "function": {"name": "lookup"}}
+    serialized = chat_request.model_dump(exclude_none=True)
+    assert serialized["tools"] == [{"type": "function", "function": {"name": "lookup"}}]
+    assert serialized["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
 
 
 def test_build_chat_request_keeps_each_history_audio_payload_distinct() -> None:
@@ -225,6 +230,22 @@ def test_project_chat_payload_returns_model_neutral_text_output() -> None:
     )
 
     assert outputs == [{"text": "hello", "data_plane_request_id": "fallback-sid-0-1"}]
+
+
+def test_model_pcm_sample_rate_overrides_the_session_hint() -> None:
+    outputs = project_chat_payload(
+        {
+            "modality": "audio",
+            "sample_rate_hz": 16_000,
+            "choices": [{"delta": {"content": base64.b64encode(b"\0\0" * 8_000).decode()}}],
+        },
+        request_id="fallback-sid-0-1",
+        response_format="pcm16",
+        sample_rate_hz=24_000,
+    )
+
+    assert outputs[0]["sample_rate_hz"] == 16_000
+    assert outputs[0]["audio_duration_ms"] == 500
 
 
 def test_project_chat_payload_preserves_streamed_tool_call_fragments() -> None:

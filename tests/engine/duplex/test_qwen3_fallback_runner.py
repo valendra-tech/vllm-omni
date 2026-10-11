@@ -24,6 +24,7 @@ from vllm_omni.engine.duplex.contracts import (
     DuplexStageSubmission,
     DuplexStageSubmissionResult,
 )
+from vllm_omni.engine.duplex.delivery import DuplexOutputBuffer
 from vllm_omni.engine.duplex.messages import (
     CloseDuplexSessionMessage,
     DuplexControlResultMessage,
@@ -39,7 +40,7 @@ from vllm_omni.engine.duplex.messages import (
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
 from vllm_omni.engine.duplex.turn_detection import TurnDetectionResult
-from vllm_omni.model_executor.models.qwen3_omni.duplex.plugin import Qwen3OmniDuplexPlugin
+from vllm_omni.model_executor.models.qwen3_omni.duplex.chat_fallback_plugin import Qwen3OmniChatFallbackPlugin
 from vllm_omni.model_executor.models.qwen3_omni.duplex.policy import INTERRUPTION_NOTE
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -132,6 +133,7 @@ class Harness:
     manager: DuplexSessionManager
     port: RecordingStagePort
     output: asyncio.Queue[Any]
+    output_buffer: DuplexOutputBuffer
     results: asyncio.Queue[Any]
     runner: DuplexSessionRunner
     events: list[Any] = field(default_factory=list)
@@ -152,6 +154,12 @@ class Harness:
         quiet_since: float | None = None
         while True:
             drained = False
+            while self.output_buffer.pending_events:
+                event = await self.output_buffer.get()
+                assert event is not None
+                if self.output_buffer.is_valid(event):
+                    collected.append(event)
+                drained = True
             while not self.output.empty():
                 message = self.output.get_nowait()
                 drained = True
@@ -255,18 +263,24 @@ async def open_harness(
     port = RecordingStagePort()
     output: asyncio.Queue[Any] = asyncio.Queue()
     results: asyncio.Queue[Any] = asyncio.Queue()
+    limits = DuplexSessionRuntimeConfig()
+    output_buffer = DuplexOutputBuffer(
+        max_bytes=limits.max_pending_output_bytes_per_session,
+        max_events=limits.max_pending_output_events_per_session,
+    )
     manager = DuplexSessionManager(
-        plugin=Qwen3OmniDuplexPlugin(_encode_audio),
+        plugin=Qwen3OmniChatFallbackPlugin(_encode_audio),
         stage_port=port,
         output_sink=output,
         result_sink=results,
-        runtime_config=DuplexSessionRuntimeConfig(),
+        runtime_config=limits,
         model_config=None,
     )
     await manager.handle(
         OpenDuplexSessionMessage(
             control_id="open-qwen3",
             session_id=SESSION_ID,
+            output_buffer=output_buffer,
             session_config=DuplexSessionConfig(
                 model="qwen3-omni",
                 modalities=list(modalities),
@@ -277,7 +291,7 @@ async def open_harness(
     result = await asyncio.wait_for(results.get(), timeout=2.0)
     assert isinstance(result, DuplexControlResultMessage) and result.ok, result
     runner = manager.runners[SESSION_ID]
-    harness = Harness(manager, port, output, results, runner)
+    harness = Harness(manager, port, output, output_buffer, results, runner)
     await harness.settle()
     return harness
 
@@ -444,6 +458,30 @@ async def test_fallback_done_marker_does_not_emit_an_empty_text_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_two_500ms_pcm_chunks_accumulate_one_second_of_playback() -> None:
+    harness = await open_harness(modalities=("text", "audio"))
+    try:
+        request = await harness.start_fallback_turn()
+        await harness.send_fallback_started(request)
+        for expected_ms in (500, 1000):
+            events = await harness.send_fallback_output(
+                request,
+                {
+                    "audio": base64.b64encode(b"\0\0" * 8_000).decode(),
+                    "audio_format": "pcm",
+                    "sample_rate_hz": 16_000,
+                    "audio_duration_ms": 500,
+                },
+            )
+            delta = _event(events, "response.output_audio.delta")
+            assert delta.sample_rate_hz == 16_000
+            assert harness.session.playback.generated_ms == expected_ms
+            assert harness.session.playback.sent_ms == expected_ms
+    finally:
+        await close_harness(harness)
+
+
+@pytest.mark.asyncio
 async def test_explicit_false_commit_does_not_use_qwen_default_auto_response() -> None:
     harness = await open_harness()
     try:
@@ -462,6 +500,24 @@ async def test_explicit_false_commit_does_not_use_qwen_default_auto_response() -
         assert harness.session.active_response_id is None
         assert harness.session.active_request_id is None
         assert harness.runner.model_state.committed_audio_payload is not None
+    finally:
+        await close_harness(harness)
+
+
+@pytest.mark.asyncio
+async def test_session_auto_response_false_defers_fallback_until_response_create() -> None:
+    harness = await open_harness()
+    try:
+        await harness.run(commands.UpdateSession(patch={"extra_body": {"auto_response": False}}))
+        await harness.run(
+            commands.AppendAudio(audio=_pcm_f32(), format="pcm_f32le", sample_rate_hz=16_000, is_speech=True)
+        )
+        await harness.run(commands.Commit())
+
+        assert harness.fallback_requests == []
+        assert harness.session.active_response_id is None
+        await harness.run(commands.CreateResponse())
+        assert len(harness.fallback_requests) == 1
     finally:
         await close_harness(harness)
 

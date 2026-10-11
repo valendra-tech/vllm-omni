@@ -407,5 +407,9 @@ def test_turn_based_server_vad_resolves_non_interrupting_defaults() -> None:
     assert isinstance(config, TurnDetectionConfig)
     assert config.interrupt_response is False
     assert config.overlap_policy == "listen_only"
-    assert payload["turn_detection"] == payload["audio"]["input"]["turn_detection"]
-    assert payload["audio"]["input"]["turn_detection"]["interrupt_response"] is False
+    audio = payload["audio"]
+    assert isinstance(audio, dict)
+    audio_input = audio["input"]
+    assert isinstance(audio_input, dict)
+    assert payload["turn_detection"] == audio_input["turn_detection"]
+    assert audio_input["turn_detection"]["interrupt_response"] is False
