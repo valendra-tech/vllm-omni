@@ -466,6 +466,14 @@ class ModelChannel:
         model_result = dict(output)
         # The API-side producer cannot change the engine-owned request identity.
         model_result["data_plane_request_id"] = request_id
+        if session.capabilities.supports_chat_fallback and "audio" in session.response_config.modalities:
+            # No alignment can be inferred from separately streamed text/audio.
+            # Only the API's [DONE] boundary establishes complete generation.
+            model_result["audio_text_mark"] = False
+            model_result["text_requires_complete_audio"] = True
+            model_result["audio_complete"] = model_result.get("end_of_turn") is True and not isinstance(
+                model_result.get("error_code"), str
+            )
         close_reason, emitted_response = await self._send_one_model_output_event(
             model_result,
             expected_epoch=expected_epoch,
@@ -1083,6 +1091,10 @@ class ModelChannel:
                 audio_complete=model_result.get("audio_complete") is True,
                 response_id=target_id,
             )
+        elif model_result.get("audio_complete") is True:
+            # Fallback [DONE] has no waveform or duration. Record completion
+            # before end_response without advancing the playback counters.
+            session.mark_audio_sent(audio_complete=True, response_id=target_id)
         payload = {
             "type": "response.output_audio.delta",
             "session_id": session.session_id,

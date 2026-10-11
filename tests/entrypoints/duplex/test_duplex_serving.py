@@ -341,7 +341,7 @@ async def test_fallback_sink_runs_chat_stream_and_keeps_internal_messages_off_wi
 
 
 @pytest.mark.asyncio
-async def test_fallback_attaches_text_stream_to_audio_output_as_transcript() -> None:
+async def test_fallback_streams_text_and_audio_independently_without_claiming_alignment() -> None:
     omni = FakeOmni()
     audio = base64.b64encode(b"\x00\x00" * 240).decode()
     chat_service = FakeChatService(
@@ -369,12 +369,10 @@ async def test_fallback_attaches_text_stream_to_audio_output_as_transcript() -> 
             request.response_id,
             request.epoch,
             {
-                "audio": audio,
-                "audio_format": "pcm",
-                "data_plane_request_id": request.request_id,
-                "sample_rate_hz": 24000,
-                "audio_duration_ms": 10,
                 "text": "hello",
+                "data_plane_request_id": request.request_id,
+                "audio_text_mark": False,
+                "text_requires_complete_audio": True,
             },
         ),
         (
@@ -382,10 +380,88 @@ async def test_fallback_attaches_text_stream_to_audio_output_as_transcript() -> 
             request.request_id,
             request.response_id,
             request.epoch,
-            {"data_plane_request_id": request.request_id, "end_of_turn": True},
+            {
+                "audio": audio,
+                "audio_format": "pcm",
+                "data_plane_request_id": request.request_id,
+                "sample_rate_hz": 24000,
+                "audio_duration_ms": 10,
+                "audio_text_mark": False,
+                "text_requires_complete_audio": True,
+            },
+        ),
+        (
+            request.session_id,
+            request.request_id,
+            request.response_id,
+            request.epoch,
+            {
+                "data_plane_request_id": request.request_id,
+                "end_of_turn": True,
+                "audio_text_mark": False,
+                "text_requires_complete_audio": True,
+                "audio_complete": True,
+            },
         ),
     ]
     assert omni.fallback_failures == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_submits_text_before_waiting_for_audio_and_audio_before_done() -> None:
+    waiting_for_audio = asyncio.Event()
+    release_audio = asyncio.Event()
+    waiting_for_done = asyncio.Event()
+    release_done = asyncio.Event()
+    audio = base64.b64encode(b"\0\0" * 240).decode()
+
+    class GatedChatService(FakeChatService):
+        async def create_chat_completion(self, request: Any, raw_request: Any = None):
+            del raw_request
+            self.requests.append(request)
+
+            async def stream():
+                yield 'data: {"choices": [{"delta": {"content": "hello"}}], "modality": "text"}\n\n'
+                yield 'data: {"choices": [{"delta": {"content": " world"}, "finish_reason": "stop"}], "modality": "text"}\n\n'
+                waiting_for_audio.set()
+                await release_audio.wait()
+                yield f'data: {{"choices": [{{"delta": {{"content": "{audio}"}}, "finish_reason": "stop"}}], "modality": "audio", "sample_rate_hz": 24000}}\n\n'
+                waiting_for_done.set()
+                await release_done.wait()
+                yield "data: [DONE]\n\n"
+
+            return stream()
+
+    omni = FakeOmni()
+    handler = _handler(omni, chat_service=GatedChatService([]))
+    request = replace(
+        _fallback_request(),
+        response_config={"model": "qwen", "modalities": ["text", "audio"], "response_format": "pcm"},
+    )
+    try:
+        assert omni.fallback_sink is not None
+        omni.fallback_sink(DuplexSessionFallbackRequestMessage(session_id=request.session_id, request=request))
+        task = handler._fallback_tasks[request.session_id]
+        await asyncio.wait_for(waiting_for_audio.wait(), timeout=2.0)
+
+        assert [output[4]["text"] for output in omni.fallback_outputs] == ["hello", " world"]
+        assert not task.done()
+        assert not any(output[4].get("audio_complete") for output in omni.fallback_outputs)
+        release_audio.set()
+        await asyncio.wait_for(waiting_for_done.wait(), timeout=2.0)
+
+        assert omni.fallback_outputs[-1][4]["audio"] == audio
+        assert "text" not in omni.fallback_outputs[-1][4]
+        assert not task.done()
+        assert not any(output[4].get("end_of_turn") for output in omni.fallback_outputs)
+        assert not any(output[4].get("audio_complete") for output in omni.fallback_outputs)
+        release_done.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert omni.fallback_outputs[-1][4]["audio_complete"] is True
+        assert omni.fallback_failures == []
+    finally:
+        await handler.close()
 
 
 @pytest.mark.asyncio

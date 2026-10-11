@@ -121,6 +121,22 @@ class Qwen3OmniChatFallbackPlugin(DuplexModelPlugin):
                 "duplex runtime configuration is server-owned: " + ", ".join(private_keys),
                 code="private_runtime_config",
             )
+        self._validate_tools(extra_body)
+
+    @staticmethod
+    def _validate_tools(extra_body: Mapping[str, object]) -> None:
+        if any(
+            extra_body.get(key)
+            for key in (
+                "tools",
+                "tool_choice",
+                "realtime_tools",
+                "realtime_tool_choice",
+                "realtime_response_tools",
+                "realtime_response_tool_choice",
+            )
+        ):
+            raise DuplexRuntimeConfigError("Qwen duplex tool calls are not implemented", code="unsupported_tools")
 
     async def prepare_runtime_config(
         self,
@@ -139,10 +155,20 @@ class Qwen3OmniChatFallbackPlugin(DuplexModelPlugin):
         source: object = config if isinstance(config, Mapping) else config.extra_body
         merged = dict(current)
         if isinstance(source, Mapping):
+            self._validate_tools(source)
             for key in PRIVATE_RUNTIME_CONFIG_KEYS:
                 if key in source:
                     merged[key] = source[key]
         return merged
+
+    def runtime_config_for_function_output(
+        self,
+        config: DuplexSessionConfig,
+        current: Mapping[str, object],
+        item: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        del config, current, item
+        raise DuplexRuntimeConfigError("Qwen duplex tool calls are not implemented", code="unsupported_tools")
 
     def data_plane_context(
         self,

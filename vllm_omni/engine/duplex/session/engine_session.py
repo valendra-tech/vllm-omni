@@ -237,9 +237,10 @@ class DuplexEngineSession:
             self.accepted_fence = self.fence
         else:
             self.accept_fence(self.fence)
-        # Seeded text is user input like any other: it is part of the canonical
-        # history and waits for a response.
-        self._add_initial_user_text(self.config.initial_user_text)
+        # Fallback seeds are canonical user input. Native plugins own their
+        # opening prompt through runtime_config and must not see it twice.
+        if self.capabilities.supports_chat_fallback:
+            self._add_initial_user_text(self.config.initial_user_text)
 
     # ---- identity / fence ----
 
@@ -615,7 +616,11 @@ class DuplexEngineSession:
         previous_seed = self.config.initial_user_text
         self.config = config
         self.config_generation += 1
-        if config.initial_user_text and config.initial_user_text != previous_seed:
+        if (
+            self.capabilities.supports_chat_fallback
+            and config.initial_user_text
+            and config.initial_user_text != previous_seed
+        ):
             self._add_initial_user_text(config.initial_user_text)
 
     def transition_turn(self, state: DuplexTurnState) -> None:
@@ -889,7 +894,13 @@ class DuplexEngineSession:
         self._clear_response_metrics()
         self._conversation.last_assistant_full_message = None
         self._conversation.last_assistant_audio_text_marks.clear()
-        self._playback.current = DuplexPlaybackCursor()
+        self._playback.current = DuplexPlaybackCursor(
+            # Early fallback text is visible but has no heard prefix, even
+            # before the first audio chunk arrives.
+            text_requires_complete_audio=(
+                self.capabilities.supports_chat_fallback and "audio" in self.response_config.modalities
+            ),
+        )
         self._playback.by_response[response_id] = self._playback.current
         self.turn_state = DuplexTurnState.ASSISTANT_GENERATING
         self._start_response_aggregator()

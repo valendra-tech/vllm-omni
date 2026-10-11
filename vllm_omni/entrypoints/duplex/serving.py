@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
+from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 from vllm.logger import init_logger
@@ -69,8 +70,10 @@ from vllm_omni.entrypoints.duplex.websocket import (
     attachment_callbacks,
     receive_text_with_timeout,
 )
-from vllm_omni.entrypoints.duplex_omni import DuplexOmni, DuplexSessionHandle
 from vllm_omni.protocol.duplex import RealtimeInputDefaults
+
+if TYPE_CHECKING:
+    from vllm_omni.entrypoints.duplex_omni import DuplexOmni, DuplexSessionHandle
 
 logger = init_logger(__name__)
 
@@ -233,8 +236,7 @@ class OmniDuplexSessionHandler:
             response_format = str(response_config.get("response_format") or "wav")
             sample_rate_hz = _fallback_output_sample_rate(response_config)
             modalities = response_config.get("modalities")
-            buffers_audio_transcript = isinstance(modalities, (list, tuple)) and "audio" in modalities
-            pending_text: list[str] = []
+            audio_requested = isinstance(modalities, (list, tuple)) and "audio" in modalities
             tool_call_buffers: dict[int | str, dict[str, object]] = {}
 
             def buffer_tool_call(fragment: Mapping[str, object]) -> None:
@@ -307,26 +309,13 @@ class OmniDuplexSessionHandler:
                         if output.get(_TOOL_CALL_FRAGMENT_KEY) is True:
                             buffer_tool_call(output)
                             continue
-                        if buffers_audio_transcript and isinstance(output.get("text"), str):
-                            pending_text.append(str(output["text"]))
-                            continue
-                        if buffers_audio_transcript and isinstance(output.get("audio"), str):
-                            if pending_text:
-                                output = {**output, "text": "".join(pending_text)}
-                                pending_text.clear()
+                        if audio_requested:
+                            # Thinker tokens and audio chunks are independent,
+                            # unaligned streams. Forward each as soon as it arrives.
+                            output = {**output, "audio_text_mark": False, "text_requires_complete_audio": True}
+                            if payload == "[DONE]":
+                                output["audio_complete"] = True
                         if output.get("end_of_turn") is True:
-                            if pending_text:
-                                await self._omni.engine.submit_fallback_output_async(
-                                    request.session_id,
-                                    request.request_id,
-                                    request.response_id,
-                                    request.epoch,
-                                    {
-                                        "text": "".join(pending_text),
-                                        "data_plane_request_id": request.request_id,
-                                    },
-                                )
-                                pending_text.clear()
                             await submit_buffered_tool_calls()
                         await self._omni.engine.submit_fallback_output_async(
                             request.session_id,

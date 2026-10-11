@@ -122,7 +122,7 @@ def test_append_audio_decodes_and_converts_pcm16_to_16k_float32():
     assert command.audio_end_ms is None
 
 
-def test_append_audio_resamples_pcm_f32le_to_16k():
+def test_append_audio_preserves_pcm_f32le_capture_rate():
     source = np.sin(np.linspace(0, 2 * np.pi, 24, endpoint=False)).astype("<f4")
     encoded = base64.b64encode(source.tobytes()).decode("ascii")
 
@@ -137,8 +137,8 @@ def test_append_audio_resamples_pcm_f32le_to_16k():
 
     assert isinstance(command, AppendAudio)
     assert command.format == "pcm_f32le"
-    assert command.sample_rate_hz == 16_000
-    assert np.frombuffer(command.audio, dtype="<f4").shape == (16,)
+    assert command.sample_rate_hz == 24_000
+    assert command.audio == source.tobytes()
 
 
 def test_append_audio_defaults_come_from_the_session_payload():

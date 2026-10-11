@@ -18,6 +18,8 @@ from vllm_omni.engine.duplex.fallback import FALLBACK_AUDIO_PAYLOAD_KEY, DuplexF
 
 _TOOL_CALL_FRAGMENT_KEY = "_duplex_tool_call_fragment"
 _TOOL_CALL_INDEX_KEY = "_duplex_tool_call_index"
+_MAX_PROMPT_AUDIO = 4
+_MAX_HISTORY_AUDIO_BYTES = 8 * 1024 * 1024
 
 
 class ChatFallbackStreamError(ValueError):
@@ -143,6 +145,50 @@ def _restore_history_audio(messages: list[dict[str, object]]) -> list[dict[str, 
     return restored
 
 
+def _bound_audio_history(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Prune complete old turns from the model-input view, before WAV encoding."""
+    turns: list[list[dict[str, object]]] = []
+    for message in messages:
+        role = message.get("role")
+        if not turns or role == "system" or (role == "user" and turns[-1][-1].get("role") != "user"):
+            turns.append([])
+        turns[-1].append(message)
+
+    budgets: list[tuple[int, int]] = []
+    for turn in turns:
+        count = size = 0
+        for message in turn:
+            content = message.get("content")
+            payload = message.get(FALLBACK_AUDIO_PAYLOAD_KEY)
+            audio = payload.get("audio") if isinstance(payload, Mapping) else None
+            for part in content if isinstance(content, list) else ():
+                if not isinstance(part, Mapping) or part.get("type") != "audio_url":
+                    continue
+                count += 1
+                audio_url = part.get("audio_url")
+                url = audio_url.get("url") if isinstance(audio_url, Mapping) else None
+                if isinstance(audio, str) and isinstance(url, str) and url.startswith("native-duplex:"):
+                    size += len(audio)
+                elif isinstance(url, str):
+                    size += len(url)
+        budgets.append((count, size))
+
+    audio_turns = [index for index, (count, _) in enumerate(budgets) if count]
+    count = sum(budget[0] for budget in budgets)
+    size = sum(budget[1] for budget in budgets)
+    dropped: set[int] = set()
+    while len(audio_turns) > 1 and (count > _MAX_PROMPT_AUDIO or size > _MAX_HISTORY_AUDIO_BYTES):
+        oldest = audio_turns.pop(0)
+        dropped.add(oldest)
+        count -= budgets[oldest][0]
+        size -= budgets[oldest][1]
+    if count > _MAX_PROMPT_AUDIO:
+        raise ValueError("fallback user turn exceeds the four-audio prompt limit")
+    # As with native Qwen history, always retain the newest audio-bearing turn
+    # even when its own payload exceeds the encoded-history byte budget.
+    return [message for index, turn in enumerate(turns) if index not in dropped for message in turn]
+
+
 def _fallback_output_sample_rate(response_config: Mapping[str, object]) -> int | None:
     def positive_rate(value: object) -> int | None:
         if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
@@ -173,8 +219,9 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
     response_config = request.response_config
     history = [dict(_copy_json(message)) for message in request.history]
     input_payload = request.input_payload
-    input_is_in_history = input_payload is not None and any(
-        message.get(FALLBACK_AUDIO_PAYLOAD_KEY) == input_payload for message in history
+    input_is_in_history = request.input_in_history or (
+        input_payload is not None
+        and any(message.get(FALLBACK_AUDIO_PAYLOAD_KEY) == input_payload for message in history)
     )
     messages: list[dict[str, object]] = [dict(_copy_json(message)) for message in request.policy_messages]
     instructions = response_config.get("instructions")
@@ -186,11 +233,14 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
             initial_user_text=response_config.get("initial_user_text"),
         )
     )
-    messages = _restore_history_audio(messages)
-
     if input_payload is not None and not input_is_in_history:
         data_uri = _audio_data_uri(input_payload)
-        messages, replaced = _replace_audio_placeholder(messages, data_uri)
+        replaced = False
+        for index, message in enumerate(messages):
+            if FALLBACK_AUDIO_PAYLOAD_KEY in message:
+                continue
+            messages[index], item_replaced = _replace_audio_placeholder(message, data_uri)
+            replaced = replaced or item_replaced
         if not replaced:
             messages.append(
                 {
@@ -198,6 +248,8 @@ def build_chat_request(request: DuplexFallbackRequest, *, model: str) -> ChatCom
                     "content": [{"type": "audio_url", "audio_url": {"url": data_uri}}],
                 }
             )
+
+    messages = _restore_history_audio(_bound_audio_history(messages))
 
     kwargs: dict[str, Any] = {
         "model": response_config.get("model") if isinstance(response_config.get("model"), str) else model,
