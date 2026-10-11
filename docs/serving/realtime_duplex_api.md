@@ -111,8 +111,14 @@ By default, `input_audio_buffer.commit` starts a response. Set
 `response_create: false` on a commit to defer it until `response.create`, or
 set `session.extra_body.auto_response: false` to disable automatic responses.
 Barge-in cancels the active fallback request and retains a one-shot interruption
-note until the next chat request is accepted. Text-only deltas use
-`response.text.delta`; audio uses `response.output_audio.delta`.
+note until the next chat request is accepted. Text deltas use
+`response.text.delta`; audio uses `response.output_audio.delta`. Text is forwarded
+as soon as the Thinker emits it. For incremental audio output, select
+`vllm_omni/deploy/qwen3_omni_chat_fallback_streaming.yaml`, which enables async
+chunking on the ordinary chat pipeline. The duplex input still starts inference
+only after commit. These independent text/audio streams have no word alignment;
+ACK-gated history includes assistant text only after complete audio generation
+and playback.
 
 `qwen3_omni_duplex.yaml` continues to select the engine-managed Qwen plugin,
 including its image input and history grouping described above. The fallback

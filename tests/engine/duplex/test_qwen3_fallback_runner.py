@@ -824,6 +824,148 @@ async def test_listen_only_overlap_retains_sustained_speech_with_fallback_auto_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_state", ["active", "playing"])
+@pytest.mark.parametrize("server_vad", [False, True])
+async def test_listen_only_quiet_tail_preserves_the_buffered_fallback_speech_turn(
+    response_state: str, server_vad: bool
+) -> None:
+    harness = await open_harness(modalities=("text", "audio"))
+    try:
+        first = await harness.start_fallback_turn()
+        await harness.send_fallback_started(first)
+        await harness.send_fallback_output(first, {"text": "first answer"})
+        await harness.send_fallback_output(
+            first,
+            {
+                "audio": base64.b64encode(b"\0\0" * 16_000).decode(),
+                "audio_format": "pcm",
+                "sample_rate_hz": 16_000,
+                "audio_duration_ms": 1000,
+            },
+        )
+        if response_state == "playing":
+            await harness.send_fallback_output(first, {"end_of_turn": True})
+            assert harness.session.active_response_id is None
+        assert harness.session.playback.sent_ms == 1000
+        assert harness.session.playback.committed_ms == 0
+
+        if server_vad:
+            harness.runner.control._detector = _ScriptedDetector(
+                [
+                    TurnDetectionResult(is_speech=True, speech_active=True, speech_started=True),
+                    TurnDetectionResult(is_speech=False, speech_active=False, speech_stopped=True, audio_end_ms=4500),
+                    TurnDetectionResult(is_speech=False, speech_active=False),
+                ]
+            )
+        speech = _pcm_f32(0.125, samples=4 * 16_000)
+        events = await harness.run(
+            commands.AppendAudio(audio=speech, format="pcm_f32le", sample_rate_hz=16_000, is_speech=True)
+        )
+        assert _event(events, "overlap.decision").reason == "policy_listen_only"
+        projector = harness.runner._require_projector()
+        item_id = projector.active_input_item_id
+        for audio_end_ms in (4500, 5000):
+            events.extend(
+                await harness.run(
+                    commands.AppendAudio(
+                        audio=_pcm_f32(0.0, samples=8_000),
+                        format="pcm_f32le",
+                        sample_rate_hz=16_000,
+                        is_speech=False,
+                        audio_end_ms=audio_end_ms,
+                    )
+                )
+            )
+            assert projector.input_audio_buffer_has_audio is True
+            assert projector.active_input_item_id == item_id
+            assert harness.session.pending_input_bytes == len(speech)
+            assert harness.runner.model_state.audio_buffer.pending_byte_count == len(speech)
+            assert harness.runner.model_state.speech_since_commit is True
+        assert [event.reason for event in events if event.type == "overlap.decision"] == [
+            "policy_listen_only",
+            "silence_or_noise",
+            "silence_or_noise",
+        ]
+        events.extend(await harness.run(commands.Commit(create_response=True)))
+
+        assert not [event for event in events if event.type == "error"]
+        assert sum(event.type == "input_audio_buffer.speech_started" for event in events) == 1
+        assert sum(event.type == "input_audio_buffer.speech_stopped" for event in events) == 1
+        assert sum(event.type == "input_audio_buffer.committed" for event in events) == 1
+        assert _event(events, "input_audio_buffer.committed").item_id == item_id
+        assert projector.input_audio_buffer_has_audio is False
+        assert projector.input_speech_started is False
+        assert harness.session.pending_input_turns == 0
+        if response_state == "active":
+            assert harness.fallback_requests == []
+            assert harness.session.pending_input_bytes == len(speech)
+        await harness.run(commands.AckPlayback(response_id=first.request.response_id, played_ms=1000))
+        if response_state == "active":
+            await harness.send_fallback_output(first, {"end_of_turn": True})
+
+        [second] = harness.fallback_requests
+        assert second.request.response_id != first.request.response_id
+        assert base64.b64decode(second.request.input_payload["audio"]) == speech
+        np.testing.assert_array_equal(_prompt_audio_samples(second)[-1], np.full(4 * 16_000, 4096, dtype="<i2"))
+        assert harness.session.pending_input_bytes == 0
+        assert harness.runner.model_state.audio_buffer.pending_byte_count == 0
+        assert harness.fallback_cancels == []
+    finally:
+        await close_harness(harness)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_state", ["active", "playing"])
+async def test_quiet_only_fallback_overlap_stays_discarded_without_a_new_response(response_state: str) -> None:
+    harness = await open_harness(modalities=("text", "audio"))
+    try:
+        first = await harness.start_fallback_turn()
+        await harness.send_fallback_output(
+            first,
+            {
+                "text": "first answer",
+                "audio": base64.b64encode(b"\0\0" * 16_000).decode(),
+                "audio_format": "pcm",
+                "sample_rate_hz": 16_000,
+                "audio_duration_ms": 1000,
+            },
+        )
+        if response_state == "playing":
+            await harness.send_fallback_output(first, {"end_of_turn": True})
+        events = []
+        for _ in range(2):
+            events.extend(
+                await harness.run(
+                    commands.AppendAudio(
+                        audio=_pcm_f32(0.0, samples=8_000),
+                        format="pcm_f32le",
+                        sample_rate_hz=16_000,
+                        is_speech=False,
+                    )
+                )
+            )
+        assert [event.reason for event in events if event.type == "overlap.decision"] == [
+            "silence_or_noise",
+            "silence_or_noise",
+        ]
+        assert not any(event.type == "input_audio_buffer.speech_stopped" for event in events)
+        assert harness.runner._require_projector().input_audio_buffer_has_audio is False
+        assert harness.session.pending_input_bytes == 0
+        assert harness.session.pending_input_turns == 0
+        assert not harness.runner.model_state.audio_buffer.has_pending()
+        assert harness.runner.model_state.speech_since_commit is False
+        events = await harness.run(commands.Commit(create_response=True))
+        assert _event(events, "error").code == "input_audio_buffer_empty"
+        await harness.run(commands.AckPlayback(response_id=first.request.response_id, played_ms=1000))
+        if response_state == "active":
+            await harness.send_fallback_output(first, {"end_of_turn": True})
+        assert harness.fallback_requests == []
+        assert harness.session.pending_input_turns == 0
+    finally:
+        await close_harness(harness)
+
+
+@pytest.mark.asyncio
 async def test_promoted_overlap_starts_another_fallback_request() -> None:
     harness = await open_harness()
     try:
