@@ -91,12 +91,20 @@ admission to one session. Its capabilities report
 `implementation_level: chat_fallback`, `supports_chat_fallback: true`, and
 `supports_input_append: false`. It accepts streaming audio appends but starts
 inference only after a committed turn; it does not append to a native model
-request or use listen/speak tokens. Images, reference voices, and session resume
-are not supported by this profile.
+request or use listen/speak tokens. Images, reference voices, session resume,
+and tool calls are not supported by this profile. Non-empty `tools` and
+`tool_choice` values are rejected at session admission, session updates, and
+`response.create` with `unsupported_tools`; function-call outputs are also
+rejected rather than acknowledged as executable input.
 
 The engine's `DuplexEngineSession.history` is the conversation ledger. Private
 per-item audio payloads are restored as WAV `audio_url` parts when constructing
-the chat request. Float PCM is normalized to 16 kHz on input. Output playback
+the chat request. Its model-input view retains at most four audio parts, pruning
+complete old turns and their replies to an 8 MiB encoded-audio budget while
+keeping the newest audio-bearing turn. The canonical ledger is retained.
+Multiple deferred commits contribute each item's audio once. Float PCM keeps
+its capture rate on the wire and is normalized to the plugin's 16 kHz native
+rate by the runner. Output playback
 duration accumulates across chunks using the model's reported sample rate.
 
 By default, `input_audio_buffer.commit` starts a response. Set

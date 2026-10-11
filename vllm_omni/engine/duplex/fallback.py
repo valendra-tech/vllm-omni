@@ -45,6 +45,9 @@ class DuplexFallbackRequest:
     response_config: Mapping[str, object]
     input_payload: Mapping[str, object] | None
     policy_messages: tuple[Mapping[str, object], ...]
+    #: Scheduling audio may aggregate several individually committed items.
+    #: Their per-item payloads already represent it in the history snapshot.
+    input_in_history: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "history", tuple(_freeze_mapping(item) for item in self.history))

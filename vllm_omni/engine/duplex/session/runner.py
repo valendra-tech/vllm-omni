@@ -77,6 +77,7 @@ from vllm_omni.engine.duplex.messages import (
 from vllm_omni.engine.duplex.plugin import (
     DuplexModelPlugin,
     DuplexModelSessionState,
+    DuplexRuntimeConfigError,
     PcmAppendReservation,
 )
 from vllm_omni.engine.duplex.realtime_events import (
@@ -533,6 +534,15 @@ class DuplexSessionRunner:
             payload = item.payload.get("payload")
             if not isinstance(payload, dict):
                 return
+            if self._supports_chat_fallback():
+                # Earlier mailbox commands may have consumed or cleared the
+                # promoted input, or started another response already.
+                if self.model_state.committed_audio_payload is None or helpers.response_in_progress(
+                    self.session, self.tasks
+                ):
+                    return
+                self._start_chat_fallback(self.model_state.committed_audio_payload)
+                return
             await self._start_append(
                 payload,
                 final=True,
@@ -614,8 +624,8 @@ class DuplexSessionRunner:
         if close_reason is not None:
             await self._close_from_runtime(close_reason)
             return
-        if finished:
-            self.run.fallback_request_id = None
+        if finished and not self.closing:
+            self.run.fallback_request_identity = None
 
     async def _on_fallback_failed(self, message: DuplexSessionFallbackFailedMessage) -> None:
         if not self._fallback_message_matches(
@@ -629,7 +639,8 @@ class DuplexSessionRunner:
             error=message.error,
             error_code=message.error_code,
         )
-        self.run.fallback_request_id = None
+        if not self.closing:
+            self.run.fallback_request_identity = None
 
     # ------------------------------------------------------------------ #
     # Commands                                                           #
@@ -813,7 +824,7 @@ class DuplexSessionRunner:
         session = self.session
         self.plugin.data_plane.close_session(session.session_id, active_request_id=session.active_request_id)
         self.run.stream_request_id = None
-        self.run.fallback_request_id = None
+        self.run.fallback_request_identity = None
 
     # ------------------------------------------------------------------ #
     # Append path (was the audio-append branch + start_native_append)    #
@@ -936,6 +947,7 @@ class DuplexSessionRunner:
                     audio,
                     fmt,
                     sample_rate_hz=sample_rate_hz,
+                    target_sample_rate_hz=self.plugin.silence_continuation_sample_rate_hz,
                 )
             except ValueError as exc:
                 self._emit_error("bad_event", str(exc))
@@ -988,7 +1000,10 @@ class DuplexSessionRunner:
         payload["is_speech"] = (
             False if video_only else overlap_policy.input_looks_like_speech(self.session, event, payload)
         )
-        auto_responds = self._session_auto_responds()
+        # Continuous native decoding and commit-triggered fallback responses
+        # have different overlap policies. Count/defer fallback speech even
+        # when commits start responses automatically.
+        auto_responds = self.out.auto_responds() and session.capabilities.supports_input_append
         defer_append = False
         buffer_overlap_audio = True
         self._mark_pending_silence_superseded()
@@ -1362,6 +1377,8 @@ class DuplexSessionRunner:
             return
         self.run.runtime_closed = True
         self._begin_close(reason)
+        if self.run.fallback_request_identity is not None:
+            await self._cancel_active_response(None, reason=reason, notify=False)
         self._cleanup_duplex_session_state()
         # ``closed_deferred`` means a manager-driven close already promised the
         # terminal after its stage cleanup. Emitting here too would give the
@@ -1528,7 +1545,13 @@ class DuplexSessionRunner:
         draining_ids = [
             request_id for request_id in session.draining_request_ids() if request_id and request_id != old_request_id
         ]
-        if not has_running_task and old_request_id is None and session.active_response_id is None and not draining_ids:
+        if (
+            not has_running_task
+            and old_request_id is None
+            and session.active_response_id is None
+            and not draining_ids
+            and self.run.fallback_request_identity is None
+        ):
             return False
 
         old_epoch = session.epoch
@@ -1577,17 +1600,18 @@ class DuplexSessionRunner:
         self.manager.invalidate_output(session.session_id, old_response_id, through_epoch=old_epoch)
         for response_id, _, _ in draining_cancels:
             self.manager.invalidate_output(session.session_id, response_id, through_epoch=old_epoch)
-        fallback_request_id = self.run.fallback_request_id
-        if fallback_request_id is not None:
+        fallback_identity = self.run.fallback_request_identity
+        if fallback_identity is not None:
+            fallback_request_id, fallback_response_id, fallback_epoch = fallback_identity
             self.manager.emit_fallback_cancel(
                 session_id=session.session_id,
                 request_id=fallback_request_id,
-                response_id=old_response_id or "",
-                epoch=old_epoch,
+                response_id=fallback_response_id,
+                epoch=fallback_epoch,
                 reason=reason,
             )
             self.plugin.data_plane.close_stream(fallback_request_id)
-            self.run.fallback_request_id = None
+            self.run.fallback_request_identity = None
             if reason in {"barge_in", "turn_detected"}:
                 self.plugin.on_barge_in(self.model_state)
         elif old_request_id is not None:
@@ -1670,7 +1694,9 @@ class DuplexSessionRunner:
                 private_runtime_config_keys=self.plugin.private_runtime_config_keys,
                 allow_response_options=self._supports_chat_fallback(),
             )
-        except DuplexConfigError as exc:
+            if self._supports_chat_fallback():
+                self.plugin.validate_client_extra_body(options.extra_body)
+        except (DuplexConfigError, DuplexRuntimeConfigError) as exc:
             return exc.code
         try:
             session.reserve_response_options(options)
@@ -1689,7 +1715,7 @@ class DuplexSessionRunner:
         response_id = session.begin_response()
         request_id = f"duplex-fallback-{session.session_id}-{session.epoch}-{session.input_commit_seq}"
         session.bind_request(request_id)
-        self.run.fallback_request_id = request_id
+        self.run.fallback_request_identity = (request_id, response_id, session.epoch)
         self.emit(self.model.response_created_payload(response_id, epoch=session.epoch, request_id=request_id))
 
         history = session.fallback_history
@@ -1713,6 +1739,7 @@ class DuplexSessionRunner:
             response_config=session.response_config.as_dict(),
             input_payload=dict(input_payload) if input_payload is not None else None,
             policy_messages=self.plugin.fallback_policy_messages(self.model_state),
+            input_in_history=input_payload is not None,
         )
         self.manager.emit_fallback_request(request)
         if self.model_state.committed_audio_payload is not None:
@@ -1750,6 +1777,7 @@ class DuplexSessionRunner:
             if commit_reservation is not None
             else model_state.audio_buffer.flush(chunk_period_ms=session.capabilities.chunk_period_ms or 1000)
         )
+        history_audio_payload = flushed
         if model_state.committed_audio_payload is not None:
             if flushed is not None:
                 flushed = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, flushed)
@@ -1779,7 +1807,7 @@ class DuplexSessionRunner:
             session,
             realtime_item_id=realtime_item_id,
             transcript=event.get("transcript"),
-            fallback_audio_payload=flushed if self._supports_chat_fallback() else None,
+            fallback_audio_payload=history_audio_payload if self._supports_chat_fallback() else None,
         )
         self.emit(
             helpers.audio_committed_payload(
@@ -1992,6 +2020,7 @@ class DuplexSessionRunner:
             chunk_period_ms=session.capabilities.chunk_period_ms or 1000,
         )
         final_payload = commit_reservation.payload
+        history_audio_payload = final_payload
         if model_state.committed_audio_payload is not None:
             if final_payload is not None:
                 final_payload = overlap_policy.merge_audio_payloads(model_state.committed_audio_payload, final_payload)
@@ -2013,7 +2042,7 @@ class DuplexSessionRunner:
             realtime_item_id=realtime_item_id,
             transcript=event.get("transcript"),
             turn_id=data_plane_turn_id,
-            fallback_audio_payload=final_payload if self._supports_chat_fallback() else None,
+            fallback_audio_payload=history_audio_payload if self._supports_chat_fallback() else None,
         )
         self.emit(
             helpers.audio_committed_payload(
@@ -2116,6 +2145,8 @@ class DuplexSessionRunner:
                         "overrides for instructions, voice, temperature, max tokens, tools, or "
                         "tool_choice."
                         if response_options_error == "unsupported_native_response_options"
+                        else "The selected duplex model does not support tool calls."
+                        if response_options_error == "unsupported_tools"
                         else "response.create cannot reserve options while another response is active."
                     )
                     self._emit_error(response_options_error, error_message, event_id=event.get("realtime_event_id"))

@@ -166,6 +166,7 @@ class DuplexCapabilities:
             "session_admission_mode": self.session_admission_mode,
             "supports_audio_truncate": self.supports_audio_truncate,
             "supports_image_input": self.supports_image_input,
+            "supports_text_only_turn": self.supports_text_only_turn,
             "supports_chat_completions": self.supports_chat_completions,
             "supports_chat_fallback": self.supports_chat_fallback,
             "text_turn_priming_units": self.text_turn_priming_units,

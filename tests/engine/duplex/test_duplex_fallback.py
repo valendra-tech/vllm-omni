@@ -77,6 +77,13 @@ def test_capabilities_as_dict_exposes_chat_fallback_fields() -> None:
     assert serialized["implementation_level"] == "chat_fallback"
 
 
+@pytest.mark.parametrize("supports_text_only_turn", [False, True])
+def test_public_capabilities_preserve_text_only_turn_support(supports_text_only_turn: bool) -> None:
+    capabilities = DuplexCapabilities(supports_text_only_turn=supports_text_only_turn)
+
+    assert capabilities.as_dict()["supports_text_only_turn"] is supports_text_only_turn
+
+
 def test_fallback_messages_are_engine_messages_not_realtime_events() -> None:
     message = DuplexSessionFallbackOutputMessage(
         session_id="sid",
