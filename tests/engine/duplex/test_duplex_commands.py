@@ -122,7 +122,7 @@ def test_append_audio_decodes_and_converts_pcm16_to_16k_float32():
     assert command.audio_end_ms is None
 
 
-def test_append_audio_resamples_pcm_f32le_to_16k():
+def test_append_audio_preserves_pcm_f32le_capture_rate():
     source = np.sin(np.linspace(0, 2 * np.pi, 24, endpoint=False)).astype("<f4")
     encoded = base64.b64encode(source.tobytes()).decode("ascii")
 
@@ -137,8 +137,8 @@ def test_append_audio_resamples_pcm_f32le_to_16k():
 
     assert isinstance(command, AppendAudio)
     assert command.format == "pcm_f32le"
-    assert command.sample_rate_hz == 16_000
-    assert np.frombuffer(command.audio, dtype="<f4").shape == (16,)
+    assert command.sample_rate_hz == 24_000
+    assert command.audio == source.tobytes()
 
 
 def test_append_audio_defaults_come_from_the_session_payload():
@@ -482,3 +482,20 @@ def test_a_hint_survives_when_its_typed_field_is_unset():
     command = AppendAudio(audio=b"\x00\x00" * 8, hints={"is_speech": True})
 
     assert command.payload()["is_speech"] is True
+
+
+def test_duplex_command_mixin_keeps_empty_slots():
+    """The concrete commands combine ``DuplexCommand`` with a slotted wire command.
+
+    On Python 3.10 ``dataclass(slots=True)`` repeats the inherited fields in
+    ``__slots__`` (fixed in 3.11), so a slotted ``DuplexCommand`` gives every
+    concrete command two slotted bases and the module does not import (#7475).
+    The mixin spells out empty slots instead; instances stay ``__dict__``-free
+    on every version.
+    """
+    # ``__dataclass_params__`` only records ``slots`` from Python 3.12 on; an
+    # older interpreter proves the same thing by importing the module at all.
+    params = getattr(DuplexCommand, "__dataclass_params__")
+    assert getattr(params, "slots", False) is False, "slots=True on DuplexCommand breaks the import on Python 3.10"
+    assert DuplexCommand.__slots__ == ()
+    assert not hasattr(AppendAudio(audio=b"\x00\x00" * 8), "__dict__")

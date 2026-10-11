@@ -35,23 +35,25 @@ some GPUs.
 Asynchronous chunk streaming is **enabled by default** within the bundled configuration.
 
 The standard launch above is turn-based. To expose the Realtime duplex route
-using Qwen3's engine-resident chat-fallback bridge, select the duplex overlay:
+using Qwen3's opt-in chat-fallback bridge, select its dedicated overlay:
 
 ```bash
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091 \
-    --deploy-config vllm_omni/deploy/qwen3_omni_duplex.yaml
+    --deploy-config vllm_omni/deploy/qwen3_omni_chat_fallback.yaml
 ```
 
-Then run the raw WebSocket client:
+Then run the model-neutral barge-in client:
 
 ```bash
-python examples/online_serving/qwen3_omni/openai_realtime_client.py \
+python examples/online_serving/barge_in_client.py --preset none \
     --url ws://localhost:8091/v1/duplex \
-    --input-wav input_16k_mono.wav \
-    --output-wav realtime_output.wav
+    --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
+    --question-wav input_16k_mono.wav \
+    --interrupt-wav follow_up_16k_mono.wav \
+    --output-dir ./duplex_out
 ```
 
-The duplex overlay disables asynchronous chunk streaming because the fallback
+The fallback overlay disables asynchronous chunk streaming because the fallback
 request is created after the committed turn is assembled.
 
 For Thinker pipeline parallelism, configure `pipeline_parallel_size` and `devices`
