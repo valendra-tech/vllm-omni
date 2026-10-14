@@ -415,7 +415,7 @@ class DuplexSessionManager:
             )
         )
 
-    def _put_output_message(self, message: object) -> None:
+    def _put_output_message(self, message: EngineQueueMessage) -> None:
         put_nowait = getattr(self._output_sink, "put_nowait", None)
         if callable(put_nowait):
             put_nowait(message)
